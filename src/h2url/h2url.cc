@@ -96,7 +96,6 @@ static int32_t nlookup(const std::string &a_host, uint16_t a_port, host_info &ao
         // Initialize...
         ao_host_info.m_sa_len = sizeof(ao_host_info.m_sa);
         memset((void*) &(ao_host_info.m_sa), 0, ao_host_info.m_sa_len);
-
         // ---------------------------------------
         // get address...
         // ---------------------------------------
@@ -215,9 +214,8 @@ void tls_init(void)
         // TODO Deprecated???
         //SSLeay_add_tls_algorithms();
         OpenSSL_add_all_algorithms();
-
         // We MUST have entropy, or else there's no point to crypto.
-        if (!RAND_poll())
+        if(!RAND_poll())
         {
                 return;
         }
@@ -261,54 +259,56 @@ int32_t parse_url(const std::string &a_url, std::string &ao_host, uint16_t &ao_p
         ao_port = 0;
         for(uint32_t i_part = 0; i_part < UF_MAX; ++i_part)
         {
-                if(l_url.field_data[i_part].len &&
+                if((l_url.field_data[i_part].len == 0) ||
+
                   // TODO Some bug with parser -parsing urls like "http://127.0.0.1" sans paths
-                  ((l_url.field_data[i_part].len + l_url.field_data[i_part].off) <= l_url_fixed.length()))
+                  ((l_url.field_data[i_part].len + l_url.field_data[i_part].off) > l_url_fixed.length()))
                 {
-                        switch(i_part)
+                        continue;
+                }
+                switch(i_part)
+                {
+                case UF_SCHEMA:
+                {
+                        std::string l_part = l_url_fixed.substr(l_url.field_data[i_part].off, l_url.field_data[i_part].len);
+                        //printf("l_part: %s\n", l_part.c_str());
+                        if(l_part == "http")
                         {
-                        case UF_SCHEMA:
+                                l_is_ssl = false;
+                        }
+                        else if(l_part == "https")
                         {
-                                std::string l_part = l_url_fixed.substr(l_url.field_data[i_part].off, l_url.field_data[i_part].len);
-                                //printf("l_part: %s\n", l_part.c_str());
-                                if(l_part == "http")
-                                {
-                                        l_is_ssl = false;
-                                }
-                                else if(l_part == "https")
-                                {
-                                        l_is_ssl = true;
-                                }
-                                else
-                                {
-                                        printf("Error schema[%s] is unsupported\n", l_part.c_str());
-                                        return -1;
-                                }
-                                break;
+                                l_is_ssl = true;
                         }
-                        case UF_HOST:
+                        else
                         {
-                                std::string l_part = l_url_fixed.substr(l_url.field_data[i_part].off, l_url.field_data[i_part].len);
-                                ao_host = l_part;
-                                break;
+                                printf("Error schema[%s] is unsupported\n", l_part.c_str());
+                                return -1;
                         }
-                        case UF_PORT:
-                        {
-                                std::string l_part = l_url_fixed.substr(l_url.field_data[i_part].off, l_url.field_data[i_part].len);
-                                ao_port = (uint16_t)strtoul(l_part.c_str(), NULL, 10);
-                                break;
-                        }
-                        case UF_PATH:
-                        {
-                                std::string l_part = l_url_fixed.substr(l_url.field_data[i_part].off, l_url.field_data[i_part].len);
-                                ao_path = l_part;
-                                break;
-                        }
-                        default:
-                        {
-                                break;
-                        }
-                        }
+                        break;
+                }
+                case UF_HOST:
+                {
+                        std::string l_part = l_url_fixed.substr(l_url.field_data[i_part].off, l_url.field_data[i_part].len);
+                        ao_host = l_part;
+                        break;
+                }
+                case UF_PORT:
+                {
+                        std::string l_part = l_url_fixed.substr(l_url.field_data[i_part].off, l_url.field_data[i_part].len);
+                        ao_port = (uint16_t)strtoul(l_part.c_str(), NULL, 10);
+                        break;
+                }
+                case UF_PATH:
+                {
+                        std::string l_part = l_url_fixed.substr(l_url.field_data[i_part].off, l_url.field_data[i_part].len);
+                        ao_path = l_part;
+                        break;
+                }
+                default:
+                {
+                        break;
+                }
                 }
         }
         if(!ao_port)
@@ -359,7 +359,6 @@ SSL_CTX *tls_create_ctx(void)
 //: ----------------------------------------------------------------------------
 int tcp_connect(const std::string &a_host, uint16_t a_port)
 {
-#if 1
         // Lookup host
         int32_t l_s;
         host_info l_hi;
@@ -391,38 +390,6 @@ int tcp_connect(const std::string &a_host, uint16_t a_port)
                 return -1;
         }
         return l_fd;
-#else
-        struct addrinfo hints;
-        int fd = -1;
-        int rv;
-        char service[NI_MAXSERV];
-        struct addrinfo *res, *rp;
-        snprintf(service, sizeof(service), "%u", port);
-        memset(&hints, 0, sizeof(struct addrinfo));
-        hints.ai_family = AF_UNSPEC;
-        hints.ai_socktype = SOCK_STREAM;
-        rv = getaddrinfo(host, service, &hints, &res);
-        if (rv != 0) {
-          dief("getaddrinfo", gai_strerror(rv));
-        }
-        for (rp = res; rp; rp = rp->ai_next) {
-          printf("loopin\n");
-          fd = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
-          if (fd == -1) {
-            continue;
-          }
-          while ((rv = connect(fd, rp->ai_addr, rp->ai_addrlen)) == -1 &&
-                 errno == EINTR)
-            ;
-          if (rv == 0) {
-            break;
-          }
-          close(fd);
-          fd = -1;
-        }
-        freeaddrinfo(res);
-        return fd;
-#endif
 }
 //: ----------------------------------------------------------------------------
 //: \details: TODO
@@ -437,16 +404,13 @@ SSL *tls_connect(SSL_CTX *a_tls_ctx, const std::string &a_host, uint16_t a_port)
         {
                 return NULL;
         }
-
         //printf("Connected\n");
         // Create TLS Context
         SSL *l_tls = NULL;
         l_tls = ::SSL_new(a_tls_ctx);
         // TODO Check for NULL
-
         ::SSL_set_fd(l_tls, l_fd);
         // TODO Check for Errors
-
         // ssl_connect
         int l_s;
         ERR_clear_error();
