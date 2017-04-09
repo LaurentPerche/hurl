@@ -25,7 +25,16 @@
 //: ----------------------------------------------------------------------------
 #include "http_parser/http_parser.h"
 #include "nghttp2/nghttp2.h"
-#include "ndebug/ndebug.h"
+
+#include "hurl/status.h"
+#include "hurl/nconn/scheme.h"
+#include "hurl/nconn/host_info.h"
+#include "hurl/support/kv_map_list.h"
+#include "hurl/support/string_util.h"
+
+// internal
+#include "support/ndebug.h"
+#include "support/file_util.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -198,6 +207,240 @@ static int32_t nlookup(const std::string &a_host, uint16_t a_port, host_info &ao
                 return -1;
         }
         return 0;
+}
+//: ----------------------------------------------------------------------------
+//: request object/meta
+//: ----------------------------------------------------------------------------
+class request {
+public:
+        // -------------------------------------------------
+        // public methods
+        // -------------------------------------------------
+        request():
+                m_scheme(ns_hurl::SCHEME_TCP),
+                m_host(),
+                m_url(),
+                m_url_path(),
+                m_url_query(),
+                m_verb("GET"),
+                m_headers(),
+                m_body_data(NULL),
+                m_body_data_len(0),
+                m_port(0),
+                m_expect_resp_body_flag(true),
+                m_host_info()
+        {};
+        int set_header(const std::string &a_key, const std::string &a_val);
+        int32_t init_with_url(const std::string &a_url);
+        // -------------------------------------------------
+        // public members
+        // -------------------------------------------------
+        ns_hurl::scheme_t m_scheme;
+        std::string m_host;
+        std::string m_url;
+        std::string m_url_path;
+        std::string m_url_query;
+        std::string m_verb;
+        ns_hurl::kv_map_list_t m_headers;
+        char *m_body_data;
+        uint32_t m_body_data_len;
+        uint16_t m_port;
+        bool m_expect_resp_body_flag;
+        ns_hurl::host_info m_host_info;
+private:
+        // -------------------------------------------------
+        // private methods
+        // -------------------------------------------------
+        // Disallow copy/assign
+        request(const request &);
+        request& operator=(const request &);
+};
+//: ----------------------------------------------------------------------------
+//: \details: TODO
+//: \return:  TODO
+//: \param:   TODO
+//: ----------------------------------------------------------------------------
+int request::set_header(const std::string &a_key, const std::string &a_val)
+{
+        ns_hurl::kv_map_list_t::iterator i_obj = m_headers.find(a_key);
+        if(i_obj != m_headers.end())
+        {
+                // Special handling for Host/User-agent/referer
+                bool l_replace = false;
+                bool l_remove = false;
+                if(!strcasecmp(a_key.c_str(), "User-Agent") ||
+                   !strcasecmp(a_key.c_str(), "Referer") ||
+                   !strcasecmp(a_key.c_str(), "Accept") ||
+                   !strcasecmp(a_key.c_str(), "Host"))
+                {
+                        l_replace = true;
+                        if(a_val.empty())
+                        {
+                                l_remove = true;
+                        }
+                }
+                if(l_replace)
+                {
+                        i_obj->second.pop_front();
+                        if(!l_remove)
+                        {
+                                i_obj->second.push_back(a_val);
+                        }
+                }
+                else
+                {
+                        i_obj->second.push_back(a_val);
+                }
+        }
+        else
+        {
+                ns_hurl::str_list_t l_list;
+                l_list.push_back(a_val);
+                m_headers[a_key] = l_list;
+        }
+        return HURL_STATUS_OK;
+}
+//: ----------------------------------------------------------------------------
+//: \details: TODO
+//: \return:  TODO
+//: \param:   TODO
+//: ----------------------------------------------------------------------------
+int32_t request::init_with_url(const std::string &a_url)
+{
+        std::string l_url_fixed = a_url;
+        // Find scheme prefix "://"
+        if(a_url.find("://", 0) == std::string::npos)
+        {
+                l_url_fixed = "http://" + a_url;
+        }
+        //NDBG_PRINT("Parse url:           %s\n", a_url.c_str());
+        //NDBG_PRINT("Parse a_wildcarding: %d\n", a_wildcarding);
+        http_parser_url l_url;
+        http_parser_url_init(&l_url);
+        // silence bleating memory sanitizers...
+        //memset(&l_url, 0, sizeof(l_url));
+        int l_status;
+        l_status = http_parser_parse_url(l_url_fixed.c_str(), l_url_fixed.length(), 0, &l_url);
+        if(l_status != 0)
+        {
+                NDBG_PRINT("Error parsing url: %s\n", l_url_fixed.c_str());
+                // TODO get error msg from http_parser
+                return HURL_STATUS_ERROR;
+        }
+        // Set no port
+        m_port = 0;
+        for(uint32_t i_part = 0; i_part < UF_MAX; ++i_part)
+        {
+                //NDBG_PRINT("i_part: %d offset: %d len: %d\n", i_part, l_url.field_data[i_part].off, l_url.field_data[i_part].len);
+                //NDBG_PRINT("len+off: %d\n",       l_url.field_data[i_part].len + l_url.field_data[i_part].off);
+                //NDBG_PRINT("a_url.length(): %d\n", (int)a_url.length());
+                if(l_url.field_data[i_part].len &&
+                  // TODO Some bug with parser -parsing urls like "http://127.0.0.1" sans paths
+                  ((l_url.field_data[i_part].len + l_url.field_data[i_part].off) <= l_url_fixed.length()))
+                {
+                        switch(i_part)
+                        {
+                        case UF_SCHEMA:
+                        {
+                                std::string l_part = l_url_fixed.substr(l_url.field_data[i_part].off, l_url.field_data[i_part].len);
+                                //NDBG_PRINT("l_part: %s\n", l_part.c_str());
+                                if(l_part == "http")
+                                {
+                                        m_scheme = ns_hurl::SCHEME_TCP;
+                                }
+                                else if(l_part == "https")
+                                {
+                                        m_scheme = ns_hurl::SCHEME_TLS;
+                                }
+                                else
+                                {
+                                        NDBG_PRINT("Error schema[%s] is unsupported\n", l_part.c_str());
+                                        return HURL_STATUS_ERROR;
+                                }
+                                break;
+                        }
+                        case UF_HOST:
+                        {
+                                std::string l_part = l_url_fixed.substr(l_url.field_data[i_part].off, l_url.field_data[i_part].len);
+                                //NDBG_PRINT("l_part[UF_HOST]: %s\n", l_part.c_str());
+                                m_host = l_part;
+                                break;
+                        }
+                        case UF_PORT:
+                        {
+                                std::string l_part = l_url_fixed.substr(l_url.field_data[i_part].off, l_url.field_data[i_part].len);
+                                //NDBG_PRINT("l_part[UF_PORT]: %s\n", l_part.c_str());
+                                m_port = (uint16_t)strtoul(l_part.c_str(), NULL, 10);
+                                break;
+                        }
+                        case UF_PATH:
+                        {
+                                std::string l_part = l_url_fixed.substr(l_url.field_data[i_part].off, l_url.field_data[i_part].len);
+                                //NDBG_PRINT("l_part[UF_PATH]: %s\n", l_part.c_str());
+                                m_url_path = l_part;
+                                break;
+                        }
+                        case UF_QUERY:
+                        {
+                                std::string l_part = l_url_fixed.substr(l_url.field_data[i_part].off, l_url.field_data[i_part].len);
+                                //NDBG_PRINT("l_part[UF_QUERY]: %s\n", l_part.c_str());
+                                m_url_query = l_part;
+                                break;
+                        }
+                        case UF_FRAGMENT:
+                        {
+                                //std::string l_part = l_url_fixed.substr(l_url.field_data[i_part].off, l_url.field_data[i_part].len);
+                                //NDBG_PRINT("l_part[UF_FRAGMENT]: %s\n", l_part.c_str());
+                                //m_fragment = l_part;
+                                break;
+                        }
+                        case UF_USERINFO:
+                        {
+                                //std::string l_part = l_url_fixed.substr(l_url.field_data[i_part].off, l_url.field_data[i_part].len);
+                                //sNDBG_PRINT("l_part[UF_USERINFO]: %s\n", l_part.c_str());
+                                //m_userinfo = l_part;
+                                break;
+                        }
+                        default:
+                        {
+                                break;
+                        }
+                        }
+                }
+        }
+        // Default ports
+        if(!m_port)
+        {
+                switch(m_scheme)
+                {
+                case ns_hurl::SCHEME_TCP:
+                {
+                        m_port = 80;
+                        break;
+                }
+                case ns_hurl::SCHEME_TLS:
+                {
+                        m_port = 443;
+                        break;
+                }
+                default:
+                {
+                        m_port = 80;
+                        break;
+                }
+                }
+        }
+        //m_num_to_req = m_path_vector.size();
+        //NDBG_PRINT("Showing parsed url.\n");
+        //m_url.show();
+        if (HURL_STATUS_OK != l_status)
+        {
+                // Failure
+                NDBG_PRINT("Error parsing url: %s.\n", l_url_fixed.c_str());
+                return HURL_STATUS_ERROR;
+        }
+        //NDBG_PRINT("Parsed url: %s\n", l_url_fixed.c_str());
+        return HURL_STATUS_OK;
 }
 //: ----------------------------------------------------------------------------
 //: \details: TODO
@@ -448,42 +691,6 @@ static int select_next_proto_cb(SSL *a_ssl _U_,
         return SSL_TLSEXT_ERR_OK;
 }
 //: ----------------------------------------------------------------------------
-//: \details: TODO
-//: \return:  TODO
-//: \param:   TODO
-//: ----------------------------------------------------------------------------
-static void print_header(FILE *f,
-                         const uint8_t *name,
-                         size_t namelen,
-                         const uint8_t *value,
-                         size_t valuelen)
-{
-        fprintf(f, "%s", ANSI_COLOR_FG_BLUE);
-        fwrite(name, namelen, 1, f);
-        fprintf(f, "%s", ANSI_COLOR_OFF);
-        fprintf(f, ": ");
-        fprintf(f, "%s", ANSI_COLOR_FG_GREEN);
-        fwrite(value, valuelen, 1, f);
-        fprintf(f, "%s", ANSI_COLOR_OFF);
-        fprintf(f, "\n");
-}
-//: ----------------------------------------------------------------------------
-//: \details: Print HTTP headers to |f|. Please note that this function does not
-//:           take into account that header name and value are sequence of
-//:           octets, therefore they may contain non-printable characters.
-//: \return:  TODO
-//: \param:   TODO
-//: ----------------------------------------------------------------------------
-static void print_headers(FILE *f, nghttp2_nv *nva, size_t nvlen)
-{
-        size_t i;
-        for (i = 0; i < nvlen; ++i)
-        {
-                print_header(f, nva[i].name, nva[i].namelen, nva[i].value, nva[i].valuelen);
-        }
-        fprintf(f, "\n");
-}
-//: ----------------------------------------------------------------------------
 //: Types
 //: ----------------------------------------------------------------------------
 // ---------------------------------------------------------
@@ -633,7 +840,9 @@ static int ngxxx_header_cb(nghttp2_session *a_session _U_,
                     (l_session->m_stream->m_id == a_frame->hd.stream_id))
                 {
                         // Print response headers for the initiated request.
-                        print_header(stdout, a_name, a_namelen, a_value, a_valuelen);
+                        fprintf(stdout, "%s%.*s%s: %s%.*s%s\n",
+                                ANSI_COLOR_FG_BLUE, (int)a_namelen, a_name, ANSI_COLOR_OFF,
+                                ANSI_COLOR_FG_GREEN, (int)a_valuelen, a_value, ANSI_COLOR_OFF);
                         break;
                 }
         }
@@ -664,102 +873,15 @@ static int ngxxx_begin_headers_cb(nghttp2_session *a_session _U_,
         return 0;
 }
 //: ----------------------------------------------------------------------------
-//: \details: TODO
-//: \return:  TODO
-//: \param:   TODO
-//: ----------------------------------------------------------------------------
-static void ngxxx_init_nghttp2_session(ngxxx_session *a_session)
-{
-        nghttp2_session_callbacks *l_cb;
-        nghttp2_session_callbacks_new(&l_cb);
-        nghttp2_session_callbacks_set_send_callback(l_cb, ngxxx_send_cb);
-        nghttp2_session_callbacks_set_on_frame_recv_callback(l_cb, ngxxx_frame_recv_cb);
-        nghttp2_session_callbacks_set_on_data_chunk_recv_callback(l_cb, ngxxx_data_chunk_recv_cb);
-        nghttp2_session_callbacks_set_on_stream_close_callback(l_cb, ngxxx_stream_close_cb);
-        nghttp2_session_callbacks_set_on_header_callback(l_cb, ngxxx_header_cb);
-        nghttp2_session_callbacks_set_on_begin_headers_callback(l_cb, ngxxx_begin_headers_cb);
-        nghttp2_session_client_new(&(a_session->m_session), l_cb, a_session);
-        nghttp2_session_callbacks_del(l_cb);
-}
-//: ----------------------------------------------------------------------------
-//: \details: TODO
-//: \return:  TODO
-//: \param:   TODO
-//: ----------------------------------------------------------------------------
-static void ngxxx_send_client_connection_header(ngxxx_session *a_session)
-{
-        nghttp2_settings_entry iv[1] = { { NGHTTP2_SETTINGS_MAX_CONCURRENT_STREAMS, 100 } };
-        int rv;
-
-        /* client 24 bytes magic string will be sent by nghttp2 library */
-        rv = nghttp2_submit_settings(a_session->m_session, NGHTTP2_FLAG_NONE, iv, ARRLEN(iv));
-        if (rv != 0)
-        {
-                errx(1, "Could not submit SETTINGS: %s", nghttp2_strerror(rv));
-        }
-}
-//: ----------------------------------------------------------------------------
-//: \details: TODO
-//: \return:  TODO
-//: \param:   TODO
-//: ----------------------------------------------------------------------------
-#define MAKE_NV(NAME, VALUE, VALUELEN) {\
-                (uint8_t *) NAME, (uint8_t *)VALUE, sizeof(NAME) - 1, VALUELEN,\
-                NGHTTP2_NV_FLAG_NONE\
-        }
-
-#define MAKE_NV2(NAME, VALUE) {\
-                (uint8_t *) NAME, (uint8_t *)VALUE, sizeof(NAME) - 1, sizeof(VALUE) - 1,\
-                NGHTTP2_NV_FLAG_NONE\
-          }
-
-//: ----------------------------------------------------------------------------
-//: \details: Send HTTP request to the remote peer
-//: \return:  TODO
-//: \param:   TODO
-//: ----------------------------------------------------------------------------
-static void ngxxx_submit_request(ngxxx_session *a_session,
-                                 const std::string &a_schema,
-                                 const std::string &a_host,
-                                 const std::string &a_path)
-{
-        int32_t l_id;
-        ngxxx_stream *l_stream = a_session->m_stream;
-        //printf("[INFO] path      = %s\n", a_path.c_str());
-        //printf("[INFO] authority = %s\n", a_host.c_str());
-        // -------------------------------------------------
-        // authority note:
-        // -------------------------------------------------
-        // is the concatenation of host and port with ":" in
-        // between.
-        // -------------------------------------------------
-        nghttp2_nv l_hdrs[] = {
-                MAKE_NV2( ":method", "GET"),
-                MAKE_NV(  ":path",   a_path.c_str(), a_path.length()),
-                MAKE_NV2( ":scheme", "https"),
-                MAKE_NV(  ":authority", a_host.c_str(), a_host.length()),
-                MAKE_NV2( "accept", "*/*"),
-                MAKE_NV2( "user-agent", "nghttp2/" NGHTTP2_VERSION)
-        };
-        //fprintf(stderr, "Request headers:\n");
-        print_headers(stdout, l_hdrs, ARRLEN(l_hdrs));
-        l_id = nghttp2_submit_request(a_session->m_session, NULL, l_hdrs, ARRLEN(l_hdrs), NULL, l_stream);
-        if (l_id < 0)
-        {
-                errx(1, "Could not submit HTTP request: %s", nghttp2_strerror(l_id));
-        }
-        //printf("[INFO] Stream ID = %d\n", l_id);
-        l_stream->m_id = l_id;
-}
-//: ----------------------------------------------------------------------------
 //: \details: Print the version.
 //: \return:  TODO
 //: \param:   TODO
 //: ----------------------------------------------------------------------------
 void print_version(FILE* a_stream, int a_exit_code)
 {
-        fprintf(a_stream, "nghttp2 client example.\n");
-        fprintf(a_stream, "               Version: %s\n", "0.0.0");
+        fprintf(a_stream, "h2url: http2 curl utility\n");
+        fprintf(a_stream, "Copyright (C) 2017 Verizon Digital Media.\n");
+        fprintf(a_stream, "               Version: %s\n", HURL_VERSION);
         exit(a_exit_code);
 }
 //: ----------------------------------------------------------------------------
@@ -774,6 +896,27 @@ void print_usage(FILE* a_stream, int a_exit_code)
         fprintf(a_stream, "  -h, --help           Display this help and exit.\n");
         fprintf(a_stream, "  -V, --version        Display the version number and exit.\n");
         fprintf(a_stream, "  \n");
+        fprintf(a_stream, "Settings:\n");
+      //fprintf(a_stream, "  -d, --data           HTTP body data -supports curl style @ file specifier\n");
+        fprintf(a_stream, "  -H, --header         Request headers -can add multiple ie -H<> -H<>...\n");
+        fprintf(a_stream, "  -X, --verb           Request command -HTTP verb to use -GET/PUT/etc. Default GET\n");
+        fprintf(a_stream, "  \n");
+        fprintf(a_stream, "TLS Settings:\n");
+        fprintf(a_stream, "  -y, --cipher         Cipher --see \"openssl ciphers\" for list.\n");
+        fprintf(a_stream, "  -O, --tls_options    SSL Options string.\n");
+        fprintf(a_stream, "  -K, --tls_verify     Verify server certificate.\n");
+        fprintf(a_stream, "  -N, --tls_sni        Use SSL SNI.\n");
+        fprintf(a_stream, "  -B, --tls_self_ok    Allow self-signed certificates.\n");
+        fprintf(a_stream, "  -M, --tls_no_host    Skip host name checking.\n");
+        fprintf(a_stream, "  -F, --tls_ca_file    SSL CA File.\n");
+        fprintf(a_stream, "  -L, --tls_ca_path    SSL CA Path.\n");
+        fprintf(a_stream, "Print Options:\n");
+      //fprintf(a_stream, "  -v, --verbose        Verbose logging\n");
+        fprintf(a_stream, "  -c, --no_color       Turn off colors\n");
+        fprintf(a_stream, "  \n");
+      //fprintf(a_stream, "Debug Options:\n");
+      //fprintf(a_stream, "  -r, --trace          Turn on tracing (error/warn/debug/verbose/all)\n");
+      //fprintf(a_stream, "  \n");
         exit(a_exit_code);
 }
 //: ----------------------------------------------------------------------------
@@ -784,16 +927,33 @@ void print_usage(FILE* a_stream, int a_exit_code)
 int main(int argc, char** argv)
 {
         // -------------------------------------------------
+        // Subrequest settings
+        // -------------------------------------------------
+        request *l_request = new request();
+        // -------------------------------------------------
         // Get args...
         // -------------------------------------------------
         char l_opt;
-        std::string l_argument;
+        std::string l_arg;
         int l_option_index = 0;
         bool l_input_flag = false;
         struct option l_long_options[] =
                 {
                 { "help",           0, 0, 'h' },
                 { "version",        0, 0, 'V' },
+                { "data",           1, 0, 'd' },
+                { "header",         1, 0, 'H' },
+                { "verb",           1, 0, 'X' },
+                { "cipher",         1, 0, 'y' },
+                { "tls_options",    1, 0, 'O' },
+                { "tls_verify",     0, 0, 'K' },
+                { "tls_sni",        0, 0, 'N' },
+                { "tls_self_ok",    0, 0, 'B' },
+                { "tls_no_host",    0, 0, 'M' },
+                { "tls_ca_file",    1, 0, 'F' },
+                { "tls_ca_path",    1, 0, 'L' },
+                { "verbose",        0, 0, 'v' },
+                { "no_color",       0, 0, 'c' },
                 // list sentinel
                 { 0, 0, 0, 0 }
         };
@@ -819,23 +979,23 @@ int main(int argc, char** argv)
         // -------------------------------------------------
         // Args...
         // -------------------------------------------------
-        char l_short_arg_list[] = "hV";
+        char l_short_arg_list[] = "hVd:H:X:y:O:KNBMF:L:vc";
         while ((l_opt = getopt_long_only(argc, argv, l_short_arg_list, l_long_options, &l_option_index)) != -1)
         {
 
                 if (optarg)
                 {
-                        l_argument = std::string(optarg);
+                        l_arg = std::string(optarg);
                 }
                 else
                 {
-                        l_argument.clear();
+                        l_arg.clear();
                 }
-                //printf("arg[%c=%d]: %s\n", l_opt, l_option_index, l_argument.c_str());
+                //printf("arg[%c=%d]: %s\n", l_opt, l_option_index, l_arg.c_str());
                 switch (l_opt)
                 {
                 // -----------------------------------------
-                // Help
+                // help
                 // -----------------------------------------
                 case 'h':
                 {
@@ -843,11 +1003,83 @@ int main(int argc, char** argv)
                         break;
                 }
                 // -----------------------------------------
-                // Version
+                // version
                 // -----------------------------------------
                 case 'V':
                 {
                         print_version(stdout, 0);
+                        break;
+                }
+                // -----------------------------------------
+                // data
+                // -----------------------------------------
+                case 'd':
+                {
+                        // TODO Size limits???
+                        int32_t l_s;
+                        // If a_data starts with @ assume file
+                        if(l_arg[0] == '@')
+                        {
+                                char *l_buf;
+                                uint32_t l_len;
+                                l_s = ns_hurl::read_file(l_arg.data() + 1, &(l_buf), &(l_len));
+                                if(l_s != 0)
+                                {
+                                        printf("Error reading body data from file: %s\n", l_arg.c_str() + 1);
+                                        return HURL_STATUS_ERROR;
+                                }
+                                l_request->m_body_data = l_buf;
+                                l_request->m_body_data_len = l_len;
+                        }
+                        else
+                        {
+                                char *l_buf;
+                                uint32_t l_len;
+                                l_len = l_arg.length() + 1;
+                                l_buf = (char *)malloc(sizeof(char)*l_len);
+                                l_request->m_body_data = l_buf;
+                                l_request->m_body_data_len = l_len;
+                        }
+
+                        // Add content length
+                        char l_len_str[64];
+                        sprintf(l_len_str, "%u", l_request->m_body_data_len);
+                        l_request->set_header("Content-Length", l_len_str);
+                        break;
+                }
+                // -----------------------------------------
+                // header
+                // -----------------------------------------
+                case 'H':
+                {
+                        int32_t l_s;
+                        std::string l_key;
+                        std::string l_val;
+                        l_s = ns_hurl::break_header_string(l_arg, l_key, l_val);
+                        if (l_s != 0)
+                        {
+                                printf("Error breaking header string: %s -not in <HEADER>:<VAL> format?\n", l_arg.c_str());
+                                return HURL_STATUS_ERROR;
+                        }
+                        l_s = l_request->set_header(l_key, l_val);
+                        if (l_s != 0)
+                        {
+                                printf("Error performing set_header: %s\n", l_arg.c_str());
+                                return HURL_STATUS_ERROR;
+                        }
+                        break;
+                }
+                // -----------------------------------------
+                // verb
+                // -----------------------------------------
+                case 'X':
+                {
+                        if(l_arg.length() > 64)
+                        {
+                                printf("Error verb string: %s too large try < 64 chars\n", l_arg.c_str());
+                                return HURL_STATUS_ERROR;
+                        }
+                        l_request->m_verb = l_arg;
                         break;
                 }
                 // -----------------------------------------
@@ -932,15 +1164,71 @@ int main(int argc, char** argv)
         // -------------------------------------------------
         // init session...
         // -------------------------------------------------
-        ngxxx_init_nghttp2_session(l_session);
+        nghttp2_session_callbacks *l_cb;
+        nghttp2_session_callbacks_new(&l_cb);
+        nghttp2_session_callbacks_set_send_callback(l_cb, ngxxx_send_cb);
+        nghttp2_session_callbacks_set_on_frame_recv_callback(l_cb, ngxxx_frame_recv_cb);
+        nghttp2_session_callbacks_set_on_data_chunk_recv_callback(l_cb, ngxxx_data_chunk_recv_cb);
+        nghttp2_session_callbacks_set_on_stream_close_callback(l_cb, ngxxx_stream_close_cb);
+        nghttp2_session_callbacks_set_on_header_callback(l_cb, ngxxx_header_cb);
+        nghttp2_session_callbacks_set_on_begin_headers_callback(l_cb, ngxxx_begin_headers_cb);
+        nghttp2_session_client_new(&(l_session->m_session), l_cb, l_session);
+        nghttp2_session_callbacks_del(l_cb);
         // -------------------------------------------------
         // send connection header
         // -------------------------------------------------
-        ngxxx_send_client_connection_header(l_session);
+        nghttp2_settings_entry l_iv[1] = {
+                { NGHTTP2_SETTINGS_MAX_CONCURRENT_STREAMS, 100 }
+        };
+        int l_rv;
+        /* client 24 bytes magic string will be sent by nghttp2 library */
+        l_rv = nghttp2_submit_settings(l_session->m_session, NGHTTP2_FLAG_NONE, l_iv, ARRLEN(l_iv));
+        if(l_rv != 0)
+        {
+                errx(1, "Could not submit SETTINGS: %s", nghttp2_strerror(l_rv));
+        }
         // -------------------------------------------------
         // send request
         // -------------------------------------------------
-        ngxxx_submit_request(l_session, "https", l_host, l_path);
+        int32_t l_id;
+        ngxxx_stream *l_stream = l_session->m_stream;
+        //printf("[INFO] path      = %s\n", a_path.c_str());
+        //printf("[INFO] authority = %s\n", a_host.c_str());
+        // -------------------------------------------------
+        // authority note:
+        // -------------------------------------------------
+        // is the concatenation of host and port with ":" in
+        // between.
+        // -------------------------------------------------
+#define MAKE_NV(NAME, VALUE, VALUELEN) {(uint8_t *) NAME, (uint8_t *)VALUE, sizeof(NAME) - 1, VALUELEN, NGHTTP2_NV_FLAG_NONE}
+#define MAKE_NV2(NAME, VALUE)          {(uint8_t *) NAME, (uint8_t *)VALUE, sizeof(NAME) - 1, sizeof(VALUE) - 1, NGHTTP2_NV_FLAG_NONE}
+
+        l_request->
+
+        nghttp2_nv l_hdrs[] = {
+                MAKE_NV2( ":method", "GET"),
+                MAKE_NV(  ":path",   l_path.c_str(), l_path.length()),
+                MAKE_NV2( ":scheme", "https"),
+                MAKE_NV(  ":authority", l_host.c_str(), l_host.length()),
+                MAKE_NV2( "accept", "*/*"),
+                MAKE_NV2( "user-agent", "nghttp2/" NGHTTP2_VERSION)
+        };
+        // print headers
+        for(size_t i_h = 0; i_h < ARRLEN(l_hdrs); ++i_h)
+        {
+                fprintf(stdout, "%s%.*s%s: %s%.*s%s\n",
+                        ANSI_COLOR_FG_BLUE, (int)l_hdrs[i_h].namelen, l_hdrs[i_h].name, ANSI_COLOR_OFF,
+                        ANSI_COLOR_FG_GREEN, (int)l_hdrs[i_h].valuelen, l_hdrs[i_h].value, ANSI_COLOR_OFF);
+        }
+        fprintf(stdout, "\n");
+        //fprintf(stderr, "Request headers:\n");
+        l_id = nghttp2_submit_request(l_session->m_session, NULL, l_hdrs, ARRLEN(l_hdrs), NULL, l_stream);
+        if (l_id < 0)
+        {
+                errx(1, "Could not submit HTTP request: %s", nghttp2_strerror(l_id));
+        }
+        //printf("[INFO] Stream ID = %d\n", l_id);
+        l_stream->m_id = l_id;
         // -------------------------------------------------
         // read response
         // -------------------------------------------------
@@ -978,6 +1266,7 @@ int main(int argc, char** argv)
         // -------------------------------------------------
         // Cleanup...
         // -------------------------------------------------
+        if(l_request) {delete l_request; l_request = NULL;}
         SSL_shutdown(l_tls);
         SSL_CTX_free(l_ctx);
         //printf("Cleaning up...\n");

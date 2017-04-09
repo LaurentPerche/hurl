@@ -18,45 +18,21 @@
 #   limitations under the License.
 #
 # ------------------------------------------------------------------------------
-
 # Project setup
 project(hurl)
 cmake_minimum_required(VERSION 2.6.0)
-
 if (POLICY CMP0050)
     cmake_policy(SET CMP0050 OLD)
 endif()
-
-# header files to install
 LIST(APPEND INST_HDRS ${HDRS})
-
-# include paths
 include_directories(
     ${CMAKE_CURRENT_SOURCE_DIR}
-    #${CMAKE_CURRENT_BINARY_DIR}
-    ../../include
-    ../../ext
-    ../core/
-    ../core/dns
-    ../core/support
-    ../core/evr
-    ../core/nconn
-    ../core/http
-    ../core/ndebug
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/ext
+    ${CMAKE_SOURCE_DIR}/src/core
 )
-
-#add_definitions(-std=c++0x)
-
-# Source files
-SET(SRCS
-  hurl.cc
-  tinymt64.cc
-)
-
-# Headers
-SET(HDRS
-)
-
+SET(SRCS hurl.cc tinymt64.cc)
+SET(HDRS)
 # ------------------------------------------------------------------------------
 # Man page...
 # ------------------------------------------------------------------------------
@@ -73,7 +49,6 @@ ADD_CUSTOM_COMMAND(
   DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/hurl.1
 )
 INSTALL(FILES ${CMAKE_CURRENT_BINARY_DIR}/hurl.1 DESTINATION ${CMAKE_INSTALL_PREFIX}/man/man1)
-
 # ------------------------------------------------------------------------------
 # build and install
 # ------------------------------------------------------------------------------
@@ -81,8 +56,7 @@ add_executable(hurl_cmd ${HDRS} ${SRCS})
 add_dependencies(hurl_cmd hurlcore)
 SET_TARGET_PROPERTIES(hurl_cmd PROPERTIES OUTPUT_NAME "hurl")
 target_link_libraries(hurl_cmd ${CMAKE_BINARY_DIR}/src/core/libhurl.a ${LIBRARIES})
-
 install(TARGETS hurl_cmd
-        DESTINATION ${CMAKE_INSTALL_PREFIX}/bin/
-        COMPONENT Executables
-        )
+  DESTINATION ${CMAKE_INSTALL_PREFIX}/bin/
+  COMPONENT Executables
+)

@@ -20,18 +20,14 @@
 //:   limitations under the License.
 //:
 //: ----------------------------------------------------------------------------
-
 //: ----------------------------------------------------------------------------
 //: Includes
 //: ----------------------------------------------------------------------------
 #include "rapidjson/document.h"
 #include "rapidjson/stringbuffer.h"
 #include "rapidjson/prettywriter.h"
-
 #include "http_parser/http_parser.h"
-
-#include "ndebug.h"
-
+// hurl
 #include "hurl/status.h"
 #include "hurl/support/atomic.h"
 #include "hurl/support/trace.h"
@@ -44,13 +40,15 @@
 #include "hurl/http/http_status.h"
 #include "hurl/http/resp.h"
 #include "hurl/http/api_resp.h"
-
 #include "hurl/dns/nresolver.h"
 #include "hurl/support/tls_util.h"
 #include "hurl/nconn/nconn.h"
 #include "hurl/nconn/nconn_tcp.h"
 #include "hurl/nconn/nconn_tls.h"
 #include "hurl/http/cb.h"
+// internal
+#include "support/ndebug.h"
+#include "support/file_util.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -62,26 +60,20 @@
 #include <signal.h>
 #include <sys/types.h>
 #include <sys/stat.h>
-
 // Get resource limits
 #include <sys/resource.h>
-
 #include <string>
 #include <list>
 #include <queue>
 #include <algorithm>
-
 // Profiler
 #ifdef ENABLE_PROFILER
 #include <gperftools/profiler.h>
 #include <gperftools/heap-profiler.h>
 #endif
-
 // TLS
 #include <openssl/ssl.h>
 #include <openssl/x509v3.h>
-
-
 //: ----------------------------------------------------------------------------
 //: Constants
 //: ----------------------------------------------------------------------------
@@ -1123,63 +1115,6 @@ static int32_t s_create_request(request &a_request, ns_hurl::nbq &a_nbq)
         }
         return STATUS_OK;
 }
-
-//: ----------------------------------------------------------------------------
-//: \details: TODO
-//: \return:  TODO
-//: \param:   TODO
-//: ----------------------------------------------------------------------------
-int32_t read_file(const char *a_file, char **a_buf, uint32_t *a_len)
-{
-        // Check is a file
-        struct stat l_stat;
-        int32_t l_s = HURL_STATUS_OK;
-        l_s = stat(a_file, &l_stat);
-        if(l_s != 0)
-        {
-                printf("Error performing stat on file: %s.  Reason: %s\n", a_file, strerror(errno));
-                return STATUS_ERROR;
-        }
-
-        // Check if is regular file
-        if(!(l_stat.st_mode & S_IFREG))
-        {
-                printf("Error opening file: %s.  Reason: is NOT a regular file\n", a_file);
-                return STATUS_ERROR;
-        }
-
-        // Open file...
-        FILE * l_file;
-        l_file = fopen(a_file,"r");
-        if (NULL == l_file)
-        {
-                printf("Error opening file: %s.  Reason: %s\n", a_file, strerror(errno));
-                return STATUS_ERROR;
-        }
-
-        // Read in file...
-        int32_t l_size = l_stat.st_size;
-        *a_buf = (char *)malloc(sizeof(char)*l_size);
-        *a_len = l_size;
-        int32_t l_read_size;
-        l_read_size = fread(*a_buf, 1, l_size, l_file);
-        if(l_read_size != l_size)
-        {
-                printf("Error performing fread.  Reason: %s [%d:%d]\n",
-                                strerror(errno), l_read_size, l_size);
-                return STATUS_ERROR;
-        }
-
-        // Close file...
-        l_s = fclose(l_file);
-        if (HURL_STATUS_OK != l_s)
-        {
-                printf("Error performing fclose.  Reason: %s\n", strerror(errno));
-                return STATUS_ERROR;
-        }
-        return 0;
-}
-
 //: ----------------------------------------------------------------------------
 //: Prototypes
 //: ----------------------------------------------------------------------------
@@ -1816,33 +1751,33 @@ int main(int argc, char** argv)
 
                 switch (l_opt)
                 {
-                // ---------------------------------------
+                // -----------------------------------------
                 // Help
-                // ---------------------------------------
+                // -----------------------------------------
                 case 'h':
                 {
                         print_usage(stdout, 0);
                         break;
                 }
-                // ---------------------------------------
+                // -----------------------------------------
                 // Version
-                // ---------------------------------------
+                // -----------------------------------------
                 case 'V':
                 {
                         print_version(stdout, 0);
                         break;
                 }
-                // ---------------------------------------
+                // -----------------------------------------
                 // URL
-                // ---------------------------------------
+                // -----------------------------------------
                 case 'u':
                 {
                         l_url = l_arg;
                         break;
                 }
-                // ---------------------------------------
+                // -----------------------------------------
                 // Data
-                // ---------------------------------------
+                // -----------------------------------------
                 case 'd':
                 {
                         // TODO Size limits???
@@ -1852,8 +1787,8 @@ int main(int argc, char** argv)
                         {
                                 char *l_buf;
                                 uint32_t l_len;
-                                l_s = read_file(l_arg.data() + 1, &(l_buf), &(l_len));
-                                if(l_s != 0)
+                                l_s = ns_hurl::read_file(l_arg.data() + 1, &(l_buf), &(l_len));
+                                if(l_s != HURL_STATUS_OK)
                                 {
                                         printf("Error reading body data from file: %s\n", l_arg.c_str() + 1);
                                         return STATUS_ERROR;
@@ -1877,41 +1812,41 @@ int main(int argc, char** argv)
                         set_header("Content-Length", l_len_str);
                         break;
                 }
-                // ---------------------------------------
+                // -----------------------------------------
                 // Host file
-                // ---------------------------------------
+                // -----------------------------------------
                 case 'f':
                 {
                         l_host_file_str = l_arg;
                         break;
                 }
-                // ---------------------------------------
+                // -----------------------------------------
                 // Host file JSON
-                // ---------------------------------------
+                // -----------------------------------------
                 case 'J':
                 {
                         l_host_file_json_str = l_arg;
                         break;
                 }
-                // ---------------------------------------
+                // -----------------------------------------
                 // Execute line
-                // ---------------------------------------
+                // -----------------------------------------
                 case 'x':
                 {
                         l_execute_line = l_arg;
                         break;
                 }
-                // ---------------------------------------
+                // -----------------------------------------
                 // cipher
-                // ---------------------------------------
+                // -----------------------------------------
                 case 'y':
                 {
                         g_conf_tls_cipher_list = l_arg;
                         break;
                 }
-                // ---------------------------------------
+                // -----------------------------------------
                 // tls options
-                // ---------------------------------------
+                // -----------------------------------------
 #if 0
                 case 'O':
                 {
@@ -1926,57 +1861,57 @@ int main(int argc, char** argv)
                         break;
                 }
 #endif
-                // ---------------------------------------
+                // -----------------------------------------
                 // tls verify
-                // ---------------------------------------
+                // -----------------------------------------
                 case 'K':
                 {
                         g_conf_tls_verify = true;
                         break;
                 }
-                // ---------------------------------------
+                // -----------------------------------------
                 // tls sni
-                // ---------------------------------------
+                // -----------------------------------------
                 case 'N':
                 {
                         g_conf_tls_sni = true;
                         break;
                 }
-                // ---------------------------------------
+                // -----------------------------------------
                 // tls self signed
-                // ---------------------------------------
+                // -----------------------------------------
                 case 'B':
                 {
                         g_conf_tls_self_ok = true;
                         break;
                 }
-                // ---------------------------------------
+                // -----------------------------------------
                 // tls skip host check
-                // ---------------------------------------
+                // -----------------------------------------
                 case 'M':
                 {
                         g_conf_tls_no_host_check = true;
                         break;
                 }
-                // ---------------------------------------
+                // -----------------------------------------
                 // tls ca file
-                // ---------------------------------------
+                // -----------------------------------------
                 case 'F':
                 {
                         g_conf_tls_ca_file = l_arg;
                         break;
                 }
-                // ---------------------------------------
+                // -----------------------------------------
                 // tls ca path
-                // ---------------------------------------
+                // -----------------------------------------
                 case 'L':
                 {
                         g_conf_tls_ca_path = l_arg;
                         break;
                 }
-                // ---------------------------------------
+                // -----------------------------------------
                 // parallel
-                // ---------------------------------------
+                // -----------------------------------------
                 case 'p':
                 {
                         //printf("arg: --parallel: %s\n", optarg);
@@ -1991,9 +1926,9 @@ int main(int argc, char** argv)
                         g_conf_num_parallel = (uint32_t)l_val;
                         break;
                 }
-                // ---------------------------------------
+                // -----------------------------------------
                 // num threads
-                // ---------------------------------------
+                // -----------------------------------------
                 case 't':
                 {
                         //printf("arg: --threads: %s\n", l_arg.c_str());
@@ -2007,9 +1942,9 @@ int main(int argc, char** argv)
                         g_conf_num_threads = (uint32_t)l_val;
                         break;
                 }
-                // ---------------------------------------
+                // -----------------------------------------
                 // Header
-                // ---------------------------------------
+                // -----------------------------------------
                 case 'H':
                 {
                         int32_t l_s;
@@ -2029,9 +1964,9 @@ int main(int argc, char** argv)
                         }
                         break;
                 }
-                // ---------------------------------------
+                // -----------------------------------------
                 // Verb
-                // ---------------------------------------
+                // -----------------------------------------
                 case 'X':
                 {
                         if(l_arg.length() > 64)
@@ -2042,9 +1977,9 @@ int main(int argc, char** argv)
                         g_conf_verb = l_arg;
                         break;
                 }
-                // ---------------------------------------
+                // -----------------------------------------
                 // Timeout
-                // ---------------------------------------
+                // -----------------------------------------
                 case 'T':
                 {
                         int l_timeout_s = -1;
@@ -2058,41 +1993,41 @@ int main(int argc, char** argv)
                         g_conf_timeout_ms = l_timeout_s*1000;
                         break;
                 }
-                // ---------------------------------------
+                // -----------------------------------------
                 // No async dns
-                // ---------------------------------------
+                // -----------------------------------------
                 case 'n':
                 {
                         g_conf_dns_use_sync = true;
                         break;
                 }
-                // ---------------------------------------
+                // -----------------------------------------
                 // I'm poor -I aint got no cache!
-                // ---------------------------------------
+                // -----------------------------------------
                 case 'k':
                 {
                         g_conf_dns_use_ai_cache = false;
                         break;
                 }
-                // ---------------------------------------
+                // -----------------------------------------
                 // Address Info cache
-                // ---------------------------------------
+                // -----------------------------------------
                 case 'A':
                 {
                         g_conf_dns_ai_cache_file = l_arg;
                         break;
                 }
-                // ---------------------------------------
+                // -----------------------------------------
                 // connect only
-                // ---------------------------------------
+                // -----------------------------------------
                 case 'C':
                 {
                         g_conf_connect_only = true;
                         break;
                 }
-                // ---------------------------------------
+                // -----------------------------------------
                 // completion time
-                // ---------------------------------------
+                // -----------------------------------------
                 case 'Q':
                 {
                         // Set complete time in ms seconds
@@ -2101,9 +2036,9 @@ int main(int argc, char** argv)
                         g_conf_completion_time_ms = l_val*1000;
                         break;
                 }
-                // ---------------------------------------
+                // -----------------------------------------
                 // completion ratio
-                // ---------------------------------------
+                // -----------------------------------------
                 case 'W':
                 {
                         double l_val = atof(optarg);
@@ -2115,66 +2050,66 @@ int main(int argc, char** argv)
                         g_conf_completion_ratio = (float)l_val;
                         break;
                 }
-                // ---------------------------------------
+                // -----------------------------------------
                 // verbose
-                // ---------------------------------------
+                // -----------------------------------------
                 case 'v':
                 {
                         g_conf_verbose = true;
                         break;
                 }
-                // ---------------------------------------
+                // -----------------------------------------
                 // color
-                // ---------------------------------------
+                // -----------------------------------------
                 case 'c':
                 {
                         g_conf_color = false;
                         break;
                 }
-                // ---------------------------------------
+                // -----------------------------------------
                 // show progress
-                // ---------------------------------------
+                // -----------------------------------------
                 case 'm':
                 {
                         g_conf_show_summary = true;
                         break;
                 }
-                // ---------------------------------------
+                // -----------------------------------------
                 // output file
-                // ---------------------------------------
+                // -----------------------------------------
                 case 'o':
                 {
                         l_output_file = l_arg;
                         break;
                 }
-                // ---------------------------------------
+                // -----------------------------------------
                 // line delimited
-                // ---------------------------------------
+                // -----------------------------------------
                 case 'l':
                 {
                         l_output_mode = OUTPUT_LINE_DELIMITED;
                         break;
                 }
-                // ---------------------------------------
+                // -----------------------------------------
                 // json output
-                // ---------------------------------------
+                // -----------------------------------------
                 case 'j':
                 {
                         l_output_mode = OUTPUT_JSON;
                         break;
                 }
-                // ---------------------------------------
+                // -----------------------------------------
                 // pretty output
-                // ---------------------------------------
+                // -----------------------------------------
                 case 'P':
                 {
                         l_output_pretty = true;
                         break;
                 }
 #ifdef ENABLE_PROFILER
-                // ---------------------------------------
+                // -----------------------------------------
                 // Google Profiler Output File
-                // ---------------------------------------
+                // -----------------------------------------
                 case 'G':
                 {
                         l_gprof_file = l_arg;
@@ -2303,10 +2238,10 @@ int main(int argc, char** argv)
         else if(!l_host_file_json_str.empty())
         {
                 // TODO Create a function to do all this mess
-                // ---------------------------------------
+                // -----------------------------------------
                 // Check is a file
                 // TODO
-                // ---------------------------------------
+                // -----------------------------------------
                 struct stat l_stat;
                 int32_t l_s = HURL_STATUS_OK;
                 l_s = stat(l_host_file_json_str.c_str(), &l_stat);
@@ -2323,9 +2258,9 @@ int main(int argc, char** argv)
                         return STATUS_ERROR;
                 }
 
-                // ---------------------------------------
+                // -----------------------------------------
                 // Open file...
-                // ---------------------------------------
+                // -----------------------------------------
                 FILE * l_file;
                 l_file = fopen(l_host_file_json_str.c_str(),"r");
                 if (NULL == l_file)
@@ -2334,9 +2269,9 @@ int main(int argc, char** argv)
                         return STATUS_ERROR;
                 }
 
-                // ---------------------------------------
+                // -----------------------------------------
                 // Read in file...
-                // ---------------------------------------
+                // -----------------------------------------
                 int32_t l_size = l_stat.st_size;
                 int32_t l_read_size;
                 char *l_buf = (char *)malloc(sizeof(char)*l_size);
@@ -2392,9 +2327,9 @@ int main(int argc, char** argv)
                         l_request_list->push_back(l_r);
                 }
 
-                // ---------------------------------------
+                // -----------------------------------------
                 // Close file...
-                // ---------------------------------------
+                // -----------------------------------------
                 l_s = fclose(l_file);
                 if (HURL_STATUS_OK != l_s)
                 {

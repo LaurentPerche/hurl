@@ -28,38 +28,33 @@
 #include "hurl/nconn/nconn.h"
 #include "hurl/nconn/nconn_tcp.h"
 #include "hurl/nconn/nconn_tls.h"
-#include "ndebug.h"
 #include "hurl/http/cb.h"
 #include "hurl/support/obj_pool.h"
 #include "hurl/support/tls_util.h"
-
 #include "hurl/status.h"
 #include "hurl/support/time_util.h"
 #include "hurl/support/trace.h"
 #include "hurl/support/string_util.h"
 #include "hurl/support/atomic.h"
 #include "hurl/support/nbq.h"
-
 #include "hurl/evr/evr.h"
-
 #include "hurl/http/resp.h"
 #include "hurl/http/api_resp.h"
+// internal
+#include "support/ndebug.h"
+#include "support/file_util.h"
 
 #include <string.h>
-
 // getrlimit
 #include <sys/time.h>
 #include <sys/resource.h>
-
 // Mach time support clock_get_time
 #ifdef __MACH__
 #include <mach/clock.h>
 #include <mach/mach.h>
 #endif
-
 // signal
 #include <signal.h>
-
 #include <math.h>
 #include <list>
 #include <algorithm>
@@ -67,41 +62,33 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
-#include <getopt.h> // For getopt_long
+#include <getopt.h>
 #include <termios.h>
 #include <string.h>
 #include <errno.h>
 #include <sys/stat.h>
 #include <stdint.h>
-
 #ifndef __STDC_FORMAT_MACROS
 #define __STDC_FORMAT_MACROS 1
 #endif
 #include <inttypes.h>
-
 // Profiler
 #ifdef ENABLE_PROFILER
 #include <gperftools/profiler.h>
 #endif
-
 // For inet_pton
 #include <arpa/inet.h>
-
 // Bind
 #include <sys/types.h>
 #include <sys/socket.h>
-
 // Get resource limits
 #include <sys/resource.h>
-
 // free context
 #include <openssl/ssl.h>
-
 // Json output
 #include "rapidjson/document.h"
 #include "rapidjson/stringbuffer.h"
 #include "rapidjson/prettywriter.h"
-
 //: ----------------------------------------------------------------------------
 //: Constants
 //: ----------------------------------------------------------------------------
@@ -356,7 +343,6 @@ void add_stat(xstat_t &ao_stat, const xstat_t &a_from_stat)
         if(a_from_stat.m_max > ao_stat.m_max)
                 ao_stat.m_max = a_from_stat.m_max;
 }
-
 //: ----------------------------------------------------------------------------
 //: \details: TODO
 //: \return:  TODO
@@ -366,7 +352,6 @@ double xstat_struct::stdev() const
 {
         return sqrt(var());
 }
-
 //: ----------------------------------------------------------------------------
 //: Types
 //: ----------------------------------------------------------------------------
@@ -374,10 +359,9 @@ typedef struct range_struct {
         uint32_t m_start;
         uint32_t m_end;
 } range_t;
-
-// -----------------------------------------------
-// request object/meta
-// -----------------------------------------------
+//: ----------------------------------------------------------------------------
+//: request object/meta
+//: ----------------------------------------------------------------------------
 class request {
 public:
         typedef int32_t (*completion_cb_t)(request &, ns_hurl::nconn &, ns_hurl::resp &);
@@ -503,7 +487,6 @@ private:
         // Disallow copy/assign
         request& operator=(const request &);
 };
-
 typedef std::list <std::string> header_str_list_t;
 typedef std::vector <std::string> path_substr_vector_t;
 typedef std::vector <std::string> path_vector_t;
@@ -511,7 +494,6 @@ typedef std::map<std::string, std::string> header_map_t;
 typedef std::vector <range_t> range_vector_t;
 class t_hurl;
 typedef std::list <t_hurl *> t_hurl_list_t;
-
 //: ----------------------------------------------------------------------------
 //: Globals
 //: ----------------------------------------------------------------------------
@@ -522,7 +504,6 @@ static uint64_t g_rate_delta_us = 0;
 static uint32_t g_num_threads = 1;
 static int64_t g_num_to_request = -1;
 static int64_t g_reqs_per_conn = -1;
-static std::string g_cipher_str_list;
 static t_hurl_list_t g_t_hurl_list;
 static bool g_stats = true;
 static bool g_quiet = false;
@@ -533,7 +514,6 @@ static uint32_t g_interval_ms = 500;
 static uint32_t g_num_parallel = 100;
 static uint64_t g_start_time_ms = 0;
 static int32_t g_run_time_ms = -1;
-
 // -----------------------------------------------
 // Path vector support
 // -----------------------------------------------
@@ -544,31 +524,18 @@ static uint32_t g_path_vector_last_idx = 0;
 static path_order_t g_path_order = EXPLODED_PATH_ORDER_RANDOM;
 static pthread_mutex_t g_path_vector_mutex;
 static pthread_mutex_t g_completion_mutex;
-
 //: ----------------------------------------------------------------------------
 //: Prototypes
 //: ----------------------------------------------------------------------------
-void get_stat(t_stat_cntr_t &ao_total,
-              t_stat_calc_t &ao_total_calc,
-              t_stat_cntr_list_t &ao_thread);
+void get_stat(t_stat_cntr_t &ao_total, t_stat_calc_t &ao_total_calc, t_stat_cntr_list_t &ao_thread);
 void display_results_line_desc(void);
 void display_results_line(void);
 void display_responses_line_desc(void);
 void display_responses_line(void);
-
-void get_results(double a_elapsed_time,
-                 std::string &ao_results);
-
-void get_results_http_load(double a_elapsed_time,
-                           std::string &ao_results,
-                           bool a_one_line_flag = false);
-
-void get_results_json(double a_elapsed_time,
-                      std::string &ao_results);
-
-int32_t read_file(const char *a_file, char **a_buf, uint32_t *a_len);
+void get_results(double a_elapsed_time, std::string &ao_results);
+void get_results_http_load(double a_elapsed_time, std::string &ao_results, bool a_one_line_flag = false);
+void get_results_json(double a_elapsed_time, std::string &ao_results);
 static int32_t s_create_request(request &a_request, ns_hurl::nbq &a_nbq);
-
 //: ----------------------------------------------------------------------------
 //: \details: sighandler
 //: \return:  TODO
@@ -695,7 +662,6 @@ private:
         uint32_t m_timeout_ms;
 #endif
 };
-
 //: ----------------------------------------------------------------------------
 //: t_hurl
 //: ----------------------------------------------------------------------------
@@ -833,7 +799,6 @@ private:
         int32_t m_num_to_request;
 
 };
-
 //: ----------------------------------------------------------------------------
 //: \details: TODO
 //: \return:  TODO
@@ -980,7 +945,6 @@ int32_t request::init_with_url(const std::string &a_url)
         //NDBG_PRINT("Parsed url: %s\n", l_url_fixed.c_str());
         return HURL_STATUS_OK;
 }
-
 //: ----------------------------------------------------------------------------
 //: \details: TODO
 //: \return:  TODO
@@ -2692,33 +2656,33 @@ int main(int argc, char** argv)
 
                 switch (l_opt)
                 {
-                // ---------------------------------------
+                // -----------------------------------------
                 // Help
-                // ---------------------------------------
+                // -----------------------------------------
                 case 'h':
                 {
                         print_usage(stdout, 0);
                         break;
                 }
-                // ---------------------------------------
+                // -----------------------------------------
                 // Version
-                // ---------------------------------------
+                // -----------------------------------------
                 case 'V':
                 {
                         print_version(stdout, 0);
                         break;
                 }
-                // ---------------------------------------
+                // -----------------------------------------
                 // Wildcarding
-                // ---------------------------------------
+                // -----------------------------------------
                 case 'w':
                 {
                         l_wildcarding = false;
                         break;
                 }
-                // ---------------------------------------
+                // -----------------------------------------
                 // Data
-                // ---------------------------------------
+                // -----------------------------------------
                 case 'd':
                 {
                         // TODO Size limits???
@@ -2728,8 +2692,8 @@ int main(int argc, char** argv)
                         {
                                 char *l_buf;
                                 uint32_t l_len;
-                                l_s = read_file(l_arg.data() + 1, &(l_buf), &(l_len));
-                                if(l_s != 0)
+                                l_s = ns_hurl::read_file(l_arg.data() + 1, &(l_buf), &(l_len));
+                                if(l_s != HURL_STATUS_OK)
                                 {
                                         printf("Error reading body data from file: %s\n", l_arg.c_str() + 1);
                                         return HURL_STATUS_ERROR;
@@ -2753,17 +2717,9 @@ int main(int argc, char** argv)
                         l_request->set_header("Content-Length", l_len_str);
                         break;
                 }
-                // ---------------------------------------
-                // cipher
-                // ---------------------------------------
-                case 'y':
-                {
-                        g_cipher_str_list = l_arg;
-                        break;
-                }
-                // ---------------------------------------
+                // -----------------------------------------
                 // parallel
-                // ---------------------------------------
+                // -----------------------------------------
                 case 'p':
                 {
                         int32_t l_num_parallel = atoi(optarg);
@@ -2775,9 +2731,9 @@ int main(int argc, char** argv)
                         g_num_parallel = l_num_parallel;
                         break;
                 }
-                // ---------------------------------------
+                // -----------------------------------------
                 // fetches
-                // ---------------------------------------
+                // -----------------------------------------
                 case 'f':
                 {
                         int32_t l_end_fetches = atoi(optarg);
@@ -2789,9 +2745,9 @@ int main(int argc, char** argv)
                         g_num_to_request = l_end_fetches;
                         break;
                 }
-                // ---------------------------------------
+                // -----------------------------------------
                 // number of calls per connection
-                // ---------------------------------------
+                // -----------------------------------------
                 case 'N':
                 {
                         int l_val = atoi(optarg);
@@ -2807,9 +2763,9 @@ int main(int argc, char** argv)
                         }
                         break;
                 }
-                // ---------------------------------------
+                // -----------------------------------------
                 // num threads
-                // ---------------------------------------
+                // -----------------------------------------
                 case 't':
                 {
                         //NDBG_PRINT("arg: --threads: %s\n", l_arg.c_str());
@@ -2822,9 +2778,9 @@ int main(int argc, char** argv)
                         g_num_threads = l_val;
                         break;
                 }
-                // ---------------------------------------
+                // -----------------------------------------
                 // Header
-                // ---------------------------------------
+                // -----------------------------------------
                 case 'H':
                 {
                         int32_t l_s;
@@ -2844,9 +2800,9 @@ int main(int argc, char** argv)
                         }
                         break;
                 }
-                // ---------------------------------------
+                // -----------------------------------------
                 // Verb
-                // ---------------------------------------
+                // -----------------------------------------
                 case 'X':
                 {
                         if(l_arg.length() > 64)
@@ -2857,9 +2813,9 @@ int main(int argc, char** argv)
                         l_request->m_verb = l_arg;
                         break;
                 }
-                // ---------------------------------------
+                // -----------------------------------------
                 // rate
-                // ---------------------------------------
+                // -----------------------------------------
                 case 'A':
                 {
                         int l_rate = atoi(optarg);
@@ -2872,9 +2828,9 @@ int main(int argc, char** argv)
                         g_rate_delta_us = 1000000 / l_rate;
                         break;
                 }
-                // ---------------------------------------
+                // -----------------------------------------
                 // Mode
-                // ---------------------------------------
+                // -----------------------------------------
                 case 'M':
                 {
                         std::string l_order = optarg;
@@ -2894,9 +2850,9 @@ int main(int argc, char** argv)
                         }
                         break;
                 }
-                // ---------------------------------------
+                // -----------------------------------------
                 // seconds
-                // ---------------------------------------
+                // -----------------------------------------
                 case 'l':
                 {
                         int l_run_time_s = atoi(optarg);
@@ -2909,9 +2865,9 @@ int main(int argc, char** argv)
                         g_run_time_ms = l_run_time_s*1000;
                         break;
                 }
-                // ---------------------------------------
+                // -----------------------------------------
                 // timeout
-                // ---------------------------------------
+                // -----------------------------------------
                 case 'T':
                 {
                         //NDBG_PRINT("arg: --fetches: %s\n", optarg);
@@ -2926,91 +2882,91 @@ int main(int argc, char** argv)
                         l_request->m_timeout_ms = l_subreq_timeout_s*1000;
                         break;
                 }
-                // ---------------------------------------
+                // -----------------------------------------
                 // No stats
-                // ---------------------------------------
+                // -----------------------------------------
                 case 'x':
                 {
                         g_stats = false;
                         break;
                 }
-                // ---------------------------------------
+                // -----------------------------------------
                 // verbose
-                // ---------------------------------------
+                // -----------------------------------------
                 case 'v':
                 {
                         g_verbose = true;
                         l_request->m_save = true;
                         break;
                 }
-                // ---------------------------------------
+                // -----------------------------------------
                 // color
-                // ---------------------------------------
+                // -----------------------------------------
                 case 'c':
                 {
                         g_color = false;
                         break;
                 }
-                // ---------------------------------------
+                // -----------------------------------------
                 // quiet
-                // ---------------------------------------
+                // -----------------------------------------
                 case 'q':
                 {
                         g_quiet = true;
                         break;
                 }
-                // ---------------------------------------
+                // -----------------------------------------
                 // responses
-                // ---------------------------------------
+                // -----------------------------------------
                 case 'C':
                 {
                         g_show_response_codes = true;
                         break;
                 }
-                // ---------------------------------------
+                // -----------------------------------------
                 // per_interval
-                // ---------------------------------------
+                // -----------------------------------------
                 case 'L':
                 {
                         g_show_response_codes = true;
                         g_show_per_interval = true;
                         break;
                 }
-                // ---------------------------------------
+                // -----------------------------------------
                 // http_load
-                // ---------------------------------------
+                // -----------------------------------------
                 case 'Y':
                 {
                         l_results_scheme = RESULTS_SCHEME_HTTP_LOAD;
                         break;
                 }
-                // ---------------------------------------
+                // -----------------------------------------
                 // http_load_line
-                // ---------------------------------------
+                // -----------------------------------------
                 case 'Z':
                 {
                         l_results_scheme = RESULTS_SCHEME_HTTP_LOAD_LINE;
                         break;
                 }
-                // ---------------------------------------
+                // -----------------------------------------
                 // json
-                // ---------------------------------------
+                // -----------------------------------------
                 case 'j':
                 {
                         l_results_scheme = RESULTS_SCHEME_JSON;
                         break;
                 }
-                // ---------------------------------------
+                // -----------------------------------------
                 // output
-                // ---------------------------------------
+                // -----------------------------------------
                 case 'o':
                 {
                         l_output_file = optarg;
                         break;
                 }
-                // ---------------------------------------
+                // -----------------------------------------
                 // Update interval
-                // ---------------------------------------
+                // -----------------------------------------
                 case 'U':
                 {
                         int l_interval_ms = atoi(optarg);
@@ -3023,9 +2979,9 @@ int main(int argc, char** argv)
                         g_interval_ms = l_interval_ms;
                         break;
                 }
-                // ---------------------------------------
+                // -----------------------------------------
                 // trace
-                // ---------------------------------------
+                // -----------------------------------------
                 case 'r':
                 {
 
@@ -3049,18 +3005,18 @@ int main(int argc, char** argv)
                         break;
                 }
 #ifdef ENABLE_PROFILER
-                // ---------------------------------------
+                // -----------------------------------------
                 // Google Profiler Output File
-                // ---------------------------------------
+                // -----------------------------------------
                 case 'G':
                 {
                         l_gprof_file = l_arg;
                         break;
                 }
 #endif
-                // ---------------------------------------
+                // -----------------------------------------
                 // What???
-                // ---------------------------------------
+                // -----------------------------------------
                 case '?':
                 {
                         // Required argument was missing
@@ -3070,9 +3026,9 @@ int main(int argc, char** argv)
                         print_usage(stdout, -1);
                         break;
                 }
-                // ---------------------------------------
+                // -----------------------------------------
                 // Huh???
-                // ---------------------------------------
+                // -----------------------------------------
                 default:
                 {
                         fprintf(stdout, "Unrecognized option.\n");
@@ -3905,60 +3861,4 @@ void get_results_json(double a_elapsed_time,
         rapidjson::Writer<rapidjson::StringBuffer> l_writer(l_strbuf);
         l_body.Accept(l_writer);
         ao_results.assign(l_strbuf.GetString(), l_strbuf.GetSize());
-}
-
-//: ----------------------------------------------------------------------------
-//: \details: TODO
-//: \return:  TODO
-//: \param:   TODO
-//: ----------------------------------------------------------------------------
-int32_t read_file(const char *a_file, char **a_buf, uint32_t *a_len)
-{
-        // Check is a file
-        struct stat l_stat;
-        int32_t l_s = HURL_STATUS_OK;
-        l_s = stat(a_file, &l_stat);
-        if(l_s != 0)
-        {
-                printf("Error performing stat on file: %s.  Reason: %s\n", a_file, strerror(errno));
-                return HURL_STATUS_ERROR;
-        }
-
-        // Check if is regular file
-        if(!(l_stat.st_mode & S_IFREG))
-        {
-                printf("Error opening file: %s.  Reason: is NOT a regular file\n", a_file);
-                return HURL_STATUS_ERROR;
-        }
-
-        // Open file...
-        FILE * l_file;
-        l_file = fopen(a_file,"r");
-        if (NULL == l_file)
-        {
-                printf("Error opening file: %s.  Reason: %s\n", a_file, strerror(errno));
-                return HURL_STATUS_ERROR;
-        }
-
-        // Read in file...
-        int32_t l_size = l_stat.st_size;
-        *a_buf = (char *)malloc(sizeof(char)*l_size);
-        *a_len = l_size;
-        int32_t l_read_size;
-        l_read_size = fread(*a_buf, 1, l_size, l_file);
-        if(l_read_size != l_size)
-        {
-                printf("Error performing fread.  Reason: %s [%d:%d]\n",
-                                strerror(errno), l_read_size, l_size);
-                return HURL_STATUS_ERROR;
-        }
-
-        // Close file...
-        l_s = fclose(l_file);
-        if (HURL_STATUS_OK != l_s)
-        {
-                printf("Error performing fclose.  Reason: %s\n", strerror(errno));
-                return HURL_STATUS_ERROR;
-        }
-        return 0;
 }

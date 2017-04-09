@@ -31,12 +31,11 @@ endif()
 # ------------------------------------------------------------------------------
 # include paths
 include_directories(
-    ${CMAKE_CURRENT_SOURCE_DIR}
-    ${CMAKE_SOURCE_DIR}/src/core
+    ${CMAKE_SOURCE_DIR}/include
     ${CMAKE_SOURCE_DIR}/ext
+    ${CMAKE_SOURCE_DIR}/src/core
     ${CMAKE_SOURCE_DIR}/ext/nghttp2/include
 )
-#add_definitions(-std=c++0x)
 SET(SRCS h2url.cc)
 SET(HDRS)
 # ------------------------------------------------------------------------------
@@ -59,10 +58,8 @@ INSTALL(FILES ${CMAKE_CURRENT_BINARY_DIR}/h2url.1 DESTINATION ${CMAKE_INSTALL_PR
 # build and install
 # ------------------------------------------------------------------------------
 add_executable(h2url_cmd ${HDRS} ${SRCS})
-
 add_dependencies(h2url_cmd hurlcore)
 add_dependencies(h2url_cmd nghttp2)
-
 SET_TARGET_PROPERTIES(h2url_cmd
   PROPERTIES OUTPUT_NAME "h2url"
 )
