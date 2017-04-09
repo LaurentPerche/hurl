@@ -1203,8 +1203,6 @@ int main(int argc, char** argv)
 #define MAKE_NV(NAME, VALUE, VALUELEN) {(uint8_t *) NAME, (uint8_t *)VALUE, sizeof(NAME) - 1, VALUELEN, NGHTTP2_NV_FLAG_NONE}
 #define MAKE_NV2(NAME, VALUE)          {(uint8_t *) NAME, (uint8_t *)VALUE, sizeof(NAME) - 1, sizeof(VALUE) - 1, NGHTTP2_NV_FLAG_NONE}
 
-        l_request->
-
         nghttp2_nv l_hdrs[] = {
                 MAKE_NV2( ":method", "GET"),
                 MAKE_NV(  ":path",   l_path.c_str(), l_path.length()),
