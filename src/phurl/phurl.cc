@@ -257,7 +257,7 @@ std::string g_conf_url_query = "";
 
 // tls
 std::string g_conf_tls_cipher_list;
-std::string g_conf_tls_options;
+long g_conf_tls_options = (SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3);
 bool g_conf_tls_verify = false;
 bool g_conf_tls_sni = false;
 bool g_conf_tls_self_ok = false;
@@ -285,7 +285,6 @@ ns_hurl::atomic_gcc_builtin <uint32_t> g_req_num_in_flight = 0;
 ns_hurl::atomic_gcc_builtin <uint32_t> g_req_num_completed = 0;
 ns_hurl::atomic_gcc_builtin <uint32_t> g_req_num_errors = 0;
 ns_hurl::atomic_gcc_builtin <uint32_t> g_req_num_pending = 0;
-
 
 ns_hurl::atomic_gcc_builtin <uint32_t> g_sum_success = 0;
 ns_hurl::atomic_gcc_builtin <uint32_t> g_sum_error = 0;
@@ -1618,20 +1617,16 @@ int main(int argc, char** argv)
         ns_hurl::trc_log_level_set(ns_hurl::TRC_LOG_LEVEL_NONE);
         //ns_hurl::trc_log_level_set(ns_hurl::TRC_LOG_LEVEL_ALL);
         //ns_hurl::trc_log_file_open("/dev/stdout");
-
         if(isatty(fileno(stdout)) == 0)
         {
                 g_conf_color = false;
         }
-
         pthread_mutex_init(&g_sum_info_mutex, NULL);
-
         // -------------------------------------------------
         // request settings
         // -------------------------------------------------
         request_list_t *l_request_list = new request_list_t();
         set_header("User-Agent", "phurl Parallel Curl");
-
         // -------------------------------------------
         // Get args...
         // -------------------------------------------
@@ -1847,20 +1842,18 @@ int main(int argc, char** argv)
                 // -----------------------------------------
                 // tls options
                 // -----------------------------------------
-#if 0
                 case 'O':
                 {
-
                         int32_t l_s;
-                        l_s = l_srvr->set_tls_client_ctx_options(l_arg);
+                        long l_tls_options;
+                        l_s = ns_hurl::get_tls_options_str_val(l_arg, l_tls_options);
                         if(l_s != HURL_STATUS_OK)
                         {
                                 return STATUS_ERROR;
                         }
-
+                        g_conf_tls_options = l_tls_options;
                         break;
                 }
-#endif
                 // -----------------------------------------
                 // tls verify
                 // -----------------------------------------
@@ -2299,7 +2292,6 @@ int main(int argc, char** argv)
                                         l_host_file_json_str.c_str());
                         return STATUS_ERROR;
                 }
-
                 // rapidjson uses SizeType instead of size_t.
                 for(rapidjson::SizeType i_record = 0; i_record < l_doc.Size(); ++i_record)
                 {
@@ -2326,7 +2318,6 @@ int main(int argc, char** argv)
                         else l_r->m_port = g_conf_url_port;
                         l_request_list->push_back(l_r);
                 }
-
                 // -----------------------------------------
                 // Close file...
                 // -----------------------------------------
@@ -2347,7 +2338,6 @@ int main(int argc, char** argv)
                         return STATUS_ERROR;
                 }
         }
-
         if(g_conf_verbose)
         {
                 printf("Showing hostname list:\n");
@@ -2362,7 +2352,6 @@ int main(int argc, char** argv)
                         printf("%s\n", (*i_r)->m_host.c_str());
                 }
         }
-
         // -------------------------------------------
         // Sigint handler
         // -------------------------------------------
@@ -2371,7 +2360,6 @@ int main(int argc, char** argv)
                 printf("Error: can't catch SIGINT\n");
                 return STATUS_ERROR;
         }
-
         // -------------------------------------------
         // evr loop
         // -------------------------------------------
@@ -2515,7 +2503,6 @@ int main(int argc, char** argv)
                 delete l_resolver;
                 l_resolver = NULL;
         }
-
         // -------------------------------------------
         // TLS Init
         // -------------------------------------------
@@ -2525,15 +2512,13 @@ int main(int argc, char** argv)
                 ns_hurl::tls_init();
                 std::string l_unused;
                 l_ctx = ns_hurl::tls_init_ctx(g_conf_tls_cipher_list,
-                                             0,                    // ctx options
-                                             g_conf_tls_ca_file,   // ctx ca file
-                                             g_conf_tls_ca_path,   // ctx ca path
-                                             false,                // is server?
-                                             l_unused,             // tls key
-                                             l_unused);            // tls crt
+                                              g_conf_tls_options,     // ctx options
+                                             g_conf_tls_ca_file,      // ctx ca file
+                                             g_conf_tls_ca_path,      // ctx ca path
+                                             false,                   // is server?
+                                             l_unused,                // tls key
+                                             l_unused);               // tls crt
         }
-
-
         // -------------------------------------------
         // Q resolved...
         // -------------------------------------------

@@ -21,7 +21,7 @@
 //:
 //: ----------------------------------------------------------------------------
 //: ----------------------------------------------------------------------------
-//: Includes
+//: includes
 //: ----------------------------------------------------------------------------
 #include "http_parser/http_parser.h"
 #include "nghttp2/nghttp2.h"
@@ -31,6 +31,7 @@
 #include "hurl/nconn/host_info.h"
 #include "hurl/support/kv_map_list.h"
 #include "hurl/support/string_util.h"
+#include "hurl/support/tls_util.h"
 
 // internal
 #include "support/ndebug.h"
@@ -67,14 +68,22 @@
 #include <netinet/tcp.h>
 
 #include <string>
-
 //: ----------------------------------------------------------------------------
-//: Macros
+//: macros
 //: ----------------------------------------------------------------------------
 #ifndef _U_
 #define _U_ __attribute__((unused))
 #endif
 #define ARRLEN(x) (sizeof(x) / sizeof(x[0]))
+//: ----------------------------------------------------------------------------
+//: constants
+//: ----------------------------------------------------------------------------
+#ifndef STATUS_OK
+#define STATUS_OK 0
+#endif
+#ifndef STATUS_ERROR
+#define STATUS_ERROR -1
+#endif
 //: ----------------------------------------------------------------------------
 //: support routines
 //: ----------------------------------------------------------------------------
@@ -115,7 +124,6 @@ static int32_t nlookup(const std::string &a_host, uint16_t a_port, host_info &ao
         char portstr[10];
         snprintf(portstr, sizeof(portstr), "%d", (int) a_port);
         struct addrinfo* l_addrinfo;
-
         int l_gaierr;
         l_gaierr = getaddrinfo(a_host.c_str(), portstr, &l_hints, &l_addrinfo);
         if (l_gaierr != 0)
@@ -124,7 +132,6 @@ static int32_t nlookup(const std::string &a_host, uint16_t a_port, host_info &ao
                 //           a_host.c_str(), gai_strerror(l_gaierr));
                 return -1;
         }
-
         // Find the first IPv4 and IPv6 entries.
         struct addrinfo* l_addrinfo_v4 = NULL;
         struct addrinfo* l_addrinfo_v6 = NULL;
@@ -430,6 +437,10 @@ int32_t request::init_with_url(const std::string &a_url)
                 }
                 }
         }
+        if(m_url_path.empty())
+        {
+                m_url_path = "/";
+        }
         //m_num_to_req = m_path_vector.size();
         //NDBG_PRINT("Showing parsed url.\n");
         //m_url.show();
@@ -447,159 +458,6 @@ int32_t request::init_with_url(const std::string &a_url)
 //: \return:  TODO
 //: \param:   TODO
 //: ----------------------------------------------------------------------------
-void tls_init(void)
-{
-        // Initialize the OpenSSL library
-        SSL_library_init();
-        // Bring in and register error messages
-        ERR_load_crypto_strings();
-        SSL_load_error_strings();
-        // TODO Deprecated???
-        //SSLeay_add_tls_algorithms();
-        OpenSSL_add_all_algorithms();
-        // We MUST have entropy, or else there's no point to crypto.
-        if(!RAND_poll())
-        {
-                return;
-        }
-        // TODO Old method???
-#if 0
-        // Random seed
-        if (! RAND_status())
-        {
-                unsigned char bytes[1024];
-                for (size_t i = 0; i < sizeof(bytes); ++i)
-                        bytes[i] = random() % 0xff;
-                RAND_seed(bytes, sizeof(bytes));
-        }
-#endif
-}
-//: ----------------------------------------------------------------------------
-//: \details: TODO
-//: \return:  TODO
-//: \param:   TODO
-//: ----------------------------------------------------------------------------
-int32_t parse_url(const std::string &a_url, std::string &ao_host, uint16_t &ao_port, std::string &ao_path)
-{
-        std::string l_url_fixed = a_url;
-        // Find scheme prefix "://"
-        if(a_url.find("://", 0) == std::string::npos)
-        {
-                l_url_fixed = "http://" + a_url;
-        }
-        http_parser_url l_url;
-        http_parser_url_init(&l_url);
-        int l_status;
-        l_status = http_parser_parse_url(l_url_fixed.c_str(), l_url_fixed.length(), 0, &l_url);
-        if(l_status != 0)
-        {
-                printf("Error parsing url: %s\n", l_url_fixed.c_str());
-                // TODO get error msg from http_parser
-                return -1;
-        }
-        // Set no port
-        bool l_is_ssl = true;
-        ao_port = 0;
-        for(uint32_t i_part = 0; i_part < UF_MAX; ++i_part)
-        {
-                if((l_url.field_data[i_part].len == 0) ||
-
-                  // TODO Some bug with parser -parsing urls like "http://127.0.0.1" sans paths
-                  ((l_url.field_data[i_part].len + l_url.field_data[i_part].off) > l_url_fixed.length()))
-                {
-                        continue;
-                }
-                switch(i_part)
-                {
-                case UF_SCHEMA:
-                {
-                        std::string l_part = l_url_fixed.substr(l_url.field_data[i_part].off, l_url.field_data[i_part].len);
-                        //printf("l_part: %s\n", l_part.c_str());
-                        if(l_part == "http")
-                        {
-                                l_is_ssl = false;
-                        }
-                        else if(l_part == "https")
-                        {
-                                l_is_ssl = true;
-                        }
-                        else
-                        {
-                                printf("Error schema[%s] is unsupported\n", l_part.c_str());
-                                return -1;
-                        }
-                        break;
-                }
-                case UF_HOST:
-                {
-                        std::string l_part = l_url_fixed.substr(l_url.field_data[i_part].off, l_url.field_data[i_part].len);
-                        ao_host = l_part;
-                        break;
-                }
-                case UF_PORT:
-                {
-                        std::string l_part = l_url_fixed.substr(l_url.field_data[i_part].off, l_url.field_data[i_part].len);
-                        ao_port = (uint16_t)strtoul(l_part.c_str(), NULL, 10);
-                        break;
-                }
-                case UF_PATH:
-                {
-                        std::string l_part = l_url_fixed.substr(l_url.field_data[i_part].off, l_url.field_data[i_part].len);
-                        ao_path = l_part;
-                        break;
-                }
-                default:
-                {
-                        break;
-                }
-                }
-        }
-        if(!ao_port)
-        {
-                if(l_is_ssl) ao_port = 443;
-                else ao_port = 80;
-        }
-        if (l_status != 0)
-        {
-                printf("Error parsing url: %s.\n", l_url_fixed.c_str());
-                return -1;
-        }
-        return 0;
-}
-//: ----------------------------------------------------------------------------
-//: \details: Create tls ctx
-//: \return:  TODO
-//: \param:   TODO
-//: ----------------------------------------------------------------------------
-SSL_CTX *tls_create_ctx(void)
-{
-        // No validation... for now...
-        SSL_CTX *l_ctx;
-        l_ctx = SSL_CTX_new(SSLv23_client_method());
-        // leaks...
-        if (l_ctx == NULL)
-        {
-                ERR_print_errors_fp(stderr);
-                printf("SSL_CTX_new Error: %s\n", ERR_error_string(ERR_get_error(), NULL));
-                return NULL;
-        }
-        SSL_CTX_set_options(l_ctx,
-                            SSL_OP_ALL |
-                            SSL_OP_NO_SSLv2 |
-                            SSL_OP_NO_SSLv3 |
-                            SSL_OP_NO_COMPRESSION |
-                            SSL_OP_NO_SESSION_RESUMPTION_ON_RENEGOTIATION);
-
-        SSL_CTX_set_mode(l_ctx, SSL_MODE_AUTO_RETRY);
-        SSL_CTX_set_mode(l_ctx, SSL_MODE_RELEASE_BUFFERS);
-
-        return l_ctx;
-}
-//: ----------------------------------------------------------------------------
-//: \details: TODO
-//: \return:  TODO
-//: \param:   TODO
-//: ----------------------------------------------------------------------------
 int tcp_connect(const std::string &a_host, uint16_t a_port)
 {
         // Lookup host
@@ -608,8 +466,8 @@ int tcp_connect(const std::string &a_host, uint16_t a_port)
         l_s = nlookup(a_host, a_port, l_hi);
         if(l_s != 0)
         {
-                printf("Error performing nslookup host: %s port: %u\n",a_host.c_str(), a_port);
-                return -1;
+                NDBG_PRINT("Error performing nslookup host: %s port: %u\n",a_host.c_str(), a_port);
+                return STATUS_ERROR;
         }
 
         // tcp socket
@@ -619,8 +477,8 @@ int tcp_connect(const std::string &a_host, uint16_t a_port)
                         l_hi.m_sock_protocol);
         if (l_fd < 0)
         {
-                printf("Error creating socket. Reason: %s\n", ::strerror(errno));
-                return -1;
+                NDBG_PRINT("Error creating socket. Reason: %s\n", ::strerror(errno));
+                return STATUS_ERROR;
         }
 
         // connect
@@ -629,8 +487,8 @@ int tcp_connect(const std::string &a_host, uint16_t a_port)
                         (l_hi.m_sa_len));
         if (l_s < 0)
         {
-                printf("Error performing connect. Reason: %s\n", ::strerror(errno));
-                return -1;
+                NDBG_PRINT("Error performing connect. Reason: %s\n", ::strerror(errno));
+                return STATUS_ERROR;
         }
         return l_fd;
 }
@@ -642,6 +500,7 @@ int tcp_connect(const std::string &a_host, uint16_t a_port)
 SSL *tls_connect(SSL_CTX *a_tls_ctx, const std::string &a_host, uint16_t a_port)
 {
         int32_t l_fd;
+        NDBG_PRINT("performing tcp_connect\n");
         l_fd = tcp_connect(a_host, a_port);
         if(l_fd == -1)
         {
@@ -657,10 +516,11 @@ SSL *tls_connect(SSL_CTX *a_tls_ctx, const std::string &a_host, uint16_t a_port)
         // ssl_connect
         int l_s;
         ERR_clear_error();
+        NDBG_PRINT("performing SSL_connect\n");
         l_s = SSL_connect(l_tls);
         if (l_s <= 0)
         {
-                printf("Error performing SSL_connect.\n");
+                NDBG_PRINT("Error performing SSL_connect.\n");
                 // TODO Reason...
                 if(l_tls) {SSL_free(l_tls); l_tls = NULL;}
                 return NULL;
@@ -677,13 +537,14 @@ SSL *tls_connect(SSL_CTX *a_tls_ctx, const std::string &a_host, uint16_t a_port)
 //: \return:  TODO
 //: \param:   TODO
 //: ----------------------------------------------------------------------------
-static int select_next_proto_cb(SSL *a_ssl _U_,
-                                unsigned char **a_out,
-                                unsigned char *a_outlen,
-                                const unsigned char *a_in,
-                                unsigned int a_inlen,
-                                void *a_arg _U_)
+static int npn_select_next_proto_cb(SSL *a_ssl _U_,
+                                    unsigned char **a_out,
+                                    unsigned char *a_outlen,
+                                    const unsigned char *a_in,
+                                    unsigned int a_inlen,
+                                    void *a_arg _U_)
 {
+        NDBG_PRINT("next_proto_cb\n");
         if (nghttp2_select_next_protocol(a_out, a_outlen, a_in, a_inlen) <= 0)
         {
                 errx(1, "Server did not advertise " NGHTTP2_PROTO_VERSION_ID);
@@ -725,11 +586,11 @@ static ssize_t ngxxx_send_cb(nghttp2_session *a_session _U_,
 {
         ngxxx_session *l_session = (ngxxx_session *)a_user_data;
         UNUSED(l_session);
-        //NDBG_PRINT("SEND_CB\n");
-        //mem_display(a_data, a_length);
+        NDBG_PRINT("SEND_CB\n");
+        ns_hurl::mem_display(a_data, a_length);
         int l_s;
         l_s = SSL_write(l_session->m_tls, a_data, a_length);
-        //NDBG_PRINT("%sWRITE%s: l_s: %d\n", ANSI_COLOR_FG_BLUE, ANSI_COLOR_OFF, l_s);
+        NDBG_PRINT("%sWRITE%s: l_s: %d\n", ANSI_COLOR_FG_BLUE, ANSI_COLOR_OFF, l_s);
         if((l_s < 0) ||
            ((size_t)l_s < a_length))
         {
@@ -897,7 +758,7 @@ void print_usage(FILE* a_stream, int a_exit_code)
         fprintf(a_stream, "  -V, --version        Display the version number and exit.\n");
         fprintf(a_stream, "  \n");
         fprintf(a_stream, "Settings:\n");
-      //fprintf(a_stream, "  -d, --data           HTTP body data -supports curl style @ file specifier\n");
+        fprintf(a_stream, "  -d, --data           HTTP body data -supports curl style @ file specifier\n");
         fprintf(a_stream, "  -H, --header         Request headers -can add multiple ie -H<> -H<>...\n");
         fprintf(a_stream, "  -X, --verb           Request command -HTTP verb to use -GET/PUT/etc. Default GET\n");
         fprintf(a_stream, "  \n");
@@ -910,13 +771,17 @@ void print_usage(FILE* a_stream, int a_exit_code)
         fprintf(a_stream, "  -M, --tls_no_host    Skip host name checking.\n");
         fprintf(a_stream, "  -F, --tls_ca_file    SSL CA File.\n");
         fprintf(a_stream, "  -L, --tls_ca_path    SSL CA Path.\n");
+        fprintf(a_stream, "  \n");
+        fprintf(a_stream, "Output Options: -defaults to line delimited\n");
+        fprintf(a_stream, "  -o, --output         File to write output to. Defaults to stdout\n");
+        fprintf(a_stream, "  \n");
         fprintf(a_stream, "Print Options:\n");
-      //fprintf(a_stream, "  -v, --verbose        Verbose logging\n");
+        fprintf(a_stream, "  -v, --verbose        Verbose logging\n");
         fprintf(a_stream, "  -c, --no_color       Turn off colors\n");
         fprintf(a_stream, "  \n");
-      //fprintf(a_stream, "Debug Options:\n");
-      //fprintf(a_stream, "  -r, --trace          Turn on tracing (error/warn/debug/verbose/all)\n");
-      //fprintf(a_stream, "  \n");
+        fprintf(a_stream, "Debug Options:\n");
+        fprintf(a_stream, "  -r, --trace          Turn on tracing (error/warn/debug/verbose/all)\n");
+        fprintf(a_stream, "  \n");
         exit(a_exit_code);
 }
 //: ----------------------------------------------------------------------------
@@ -926,17 +791,47 @@ void print_usage(FILE* a_stream, int a_exit_code)
 //: ----------------------------------------------------------------------------
 int main(int argc, char** argv)
 {
-        // -------------------------------------------------
-        // Subrequest settings
-        // -------------------------------------------------
         request *l_request = new request();
+        bool l_conf_verbose = false;
+        bool l_conf_color = true;
+        std::string l_output_file = "";
+        std::string l_conf_tls_cipher_list;
+        long l_conf_tls_options;
+        bool l_conf_tls_verify;
+        bool l_conf_tls_sni;
+        bool l_conf_tls_self_ok;
+        bool l_conf_tls_no_host_check;
+        std::string l_conf_tls_ca_file;
+        std::string l_conf_tls_ca_path;
+        // TODO REMOVE
+        UNUSED(l_conf_verbose);
+        UNUSED(l_conf_color);
+        UNUSED(l_conf_tls_verify);
+        UNUSED(l_conf_tls_sni);
+        UNUSED(l_conf_tls_self_ok);
+        UNUSED(l_conf_tls_no_host_check);
+        // -------------------------------------------------
+        // tty???
+        // -------------------------------------------------
+        if(isatty(fileno(stdout)) == 0)
+        {
+                l_conf_color = false;
+        }
+        // -------------------------------------------------
+        // defaults
+        // -------------------------------------------------
+        // defaults from nghttp2 client example
+        l_conf_tls_options = SSL_OP_ALL |
+                             SSL_OP_NO_SSLv2 |
+                             SSL_OP_NO_SSLv3 |
+                             SSL_OP_NO_COMPRESSION |
+                             SSL_OP_NO_SESSION_RESUMPTION_ON_RENEGOTIATION;
         // -------------------------------------------------
         // Get args...
         // -------------------------------------------------
         char l_opt;
         std::string l_arg;
         int l_option_index = 0;
-        bool l_input_flag = false;
         struct option l_long_options[] =
                 {
                 { "help",           0, 0, 'h' },
@@ -952,6 +847,7 @@ int main(int argc, char** argv)
                 { "tls_no_host",    0, 0, 'M' },
                 { "tls_ca_file",    1, 0, 'F' },
                 { "tls_ca_path",    1, 0, 'L' },
+                { "output",         1, 0, 'o' },
                 { "verbose",        0, 0, 'v' },
                 { "no_color",       0, 0, 'c' },
                 // list sentinel
@@ -962,15 +858,14 @@ int main(int argc, char** argv)
         // TODO Unsure if good way to allow unspecified
         // arg...
         // -------------------------------------------------
-        std::string l_url;
         bool is_opt = false;
+        std::string l_url;
         for(int i_arg = 1; i_arg < argc; ++i_arg) {
                 if(argv[i_arg][0] == '-') {
                         is_opt = true;
                 }
                 else if(argv[i_arg][0] != '-' && is_opt == false) {
                         l_url = std::string(argv[i_arg]);
-                        l_input_flag = true;
                         break;
                 } else {
                         is_opt = false;
@@ -1026,7 +921,7 @@ int main(int argc, char** argv)
                                 if(l_s != 0)
                                 {
                                         printf("Error reading body data from file: %s\n", l_arg.c_str() + 1);
-                                        return HURL_STATUS_ERROR;
+                                        return STATUS_ERROR;
                                 }
                                 l_request->m_body_data = l_buf;
                                 l_request->m_body_data_len = l_len;
@@ -1059,13 +954,13 @@ int main(int argc, char** argv)
                         if (l_s != 0)
                         {
                                 printf("Error breaking header string: %s -not in <HEADER>:<VAL> format?\n", l_arg.c_str());
-                                return HURL_STATUS_ERROR;
+                                return STATUS_ERROR;
                         }
                         l_s = l_request->set_header(l_key, l_val);
                         if (l_s != 0)
                         {
                                 printf("Error performing set_header: %s\n", l_arg.c_str());
-                                return HURL_STATUS_ERROR;
+                                return STATUS_ERROR;
                         }
                         break;
                 }
@@ -1083,6 +978,101 @@ int main(int argc, char** argv)
                         break;
                 }
                 // -----------------------------------------
+                // cipher
+                // -----------------------------------------
+                case 'y':
+                {
+                        l_conf_tls_cipher_list = l_arg;
+                        break;
+                }
+                // -----------------------------------------
+                // tls options
+                // -----------------------------------------
+                case 'O':
+                {
+                        int32_t l_s;
+                        long l_tls_options;
+                        l_s = ns_hurl::get_tls_options_str_val(l_arg, l_tls_options);
+                        if(l_s != HURL_STATUS_OK)
+                        {
+                                return STATUS_ERROR;
+                        }
+                        l_conf_tls_options = l_tls_options;
+                        break;
+                }
+                // -----------------------------------------
+                // tls verify
+                // -----------------------------------------
+                case 'K':
+                {
+                        l_conf_tls_verify = true;
+                        break;
+                }
+                // -----------------------------------------
+                // tls sni
+                // -----------------------------------------
+                case 'N':
+                {
+                        l_conf_tls_sni = true;
+                        break;
+                }
+                // -----------------------------------------
+                // tls self signed
+                // -----------------------------------------
+                case 'B':
+                {
+                        l_conf_tls_self_ok = true;
+                        break;
+                }
+                // -----------------------------------------
+                // tls skip host check
+                // -----------------------------------------
+                case 'M':
+                {
+                        l_conf_tls_no_host_check = true;
+                        break;
+                }
+                // -----------------------------------------
+                // tls ca file
+                // -----------------------------------------
+                case 'F':
+                {
+                        l_conf_tls_ca_file = l_arg;
+                        break;
+                }
+                // -----------------------------------------
+                // tls ca path
+                // -----------------------------------------
+                case 'L':
+                {
+                        l_conf_tls_ca_path = l_arg;
+                        break;
+                }
+                // -----------------------------------------
+                // output file
+                // -----------------------------------------
+                case 'o':
+                {
+                        l_output_file = l_arg;
+                        break;
+                }
+                // -----------------------------------------
+                // verbose
+                // -----------------------------------------
+                case 'v':
+                {
+                        l_conf_verbose = true;
+                        break;
+                }
+                // -----------------------------------------
+                // color
+                // -----------------------------------------
+                case 'c':
+                {
+                        l_conf_color = false;
+                        break;
+                }
+                // -----------------------------------------
                 // What???
                 // -----------------------------------------
                 case '?':
@@ -1091,7 +1081,7 @@ int main(int argc, char** argv)
                         // '?' is provided when the 3rd arg to getopt_long does not begin with a ':', and is preceeded
                         // by an automatic error message.
                         printf("  Exiting.\n");
-                        print_usage(stdout, -1);
+                        print_usage(stdout, STATUS_ERROR);
                         break;
                 }
                 // -----------------------------------------
@@ -1100,7 +1090,7 @@ int main(int argc, char** argv)
                 default:
                 {
                         printf("Unrecognized option.\n");
-                        print_usage(stdout, -1);
+                        print_usage(stdout, STATUS_ERROR);
                         break;
                 }
                 }
@@ -1108,45 +1098,80 @@ int main(int argc, char** argv)
         // -------------------------------------------------
         // verify input
         // -------------------------------------------------
-        if(!l_input_flag)
+        if(l_url.empty())
         {
                 printf("Error: url required.");
-                print_usage(stdout, -1);
+                print_usage(stdout, STATUS_ERROR);
+        }
+        int32_t l_s;
+        l_s = l_request->init_with_url(l_url);
+        if(l_s != HURL_STATUS_OK)
+        {
+                printf("Error: performing init_with_url.");
+                print_usage(stdout, STATUS_ERROR);
         }
         // -------------------------------------------------
         // init tls...
         // -------------------------------------------------
-        tls_init();
+        ns_hurl::tls_init();
         SSL_CTX *l_ctx = NULL;
-        l_ctx = tls_create_ctx();
-        if(!l_ctx)
-        {
-                printf("Error performing tls_create_ctx\n");
-                return -1;
-        }
-        SSL_CTX_set_next_proto_select_cb(l_ctx, select_next_proto_cb, NULL);
-        // -------------------------------------------------
-        // Get host/path
-        // -------------------------------------------------
-        std::string l_host;
-        std::string l_path;
-        uint16_t l_port = 443;
-        int32_t l_s;
-        l_s = parse_url(l_url, l_host, l_port, l_path);
-        if(l_s != 0)
-        {
-                printf("Error performing parse_url.\n");
-        }
-        // set path to / if empty
-        if(l_path.empty())
-        {
-                l_path = "/";
-        }
+        std::string l_unused;
+        l_ctx = ns_hurl::tls_init_ctx(l_conf_tls_cipher_list, // ctx cipher list str
+                                      l_conf_tls_options,     // ctx options
+                                      l_conf_tls_ca_file,     // ctx ca file
+                                      l_conf_tls_ca_path,     // ctx ca path
+                                      false,                  // is server?
+                                      l_unused,               // tls key
+                                      l_unused);              // tls crt
+        // modes from nghttp2 client example
+        SSL_CTX_set_mode(l_ctx, SSL_MODE_AUTO_RETRY);
+        SSL_CTX_set_mode(l_ctx, SSL_MODE_RELEASE_BUFFERS);
+        // set npn callback
+        SSL_CTX_set_next_proto_select_cb(l_ctx, npn_select_next_proto_cb, NULL);
+#if OPENSSL_VERSION_NUMBER >= 0x10002000L
+        SSL_CTX_set_alpn_protos(l_ctx, (const unsigned char *)"\x02h2", 3);
+#endif // OPENSSL_VERSION_NUMBER >= 0x10002000L
+
+#if 0
+#ifdef HAS_NPN
+  if(conn->bits.tls_enable_npn)
+    SSL_CTX_set_next_proto_select_cb(connssl->ctx, select_next_proto_cb, conn);
+#endif
+
+#ifdef HAS_ALPN
+  if(conn->bits.tls_enable_alpn) {
+    int cur = 0;
+    unsigned char protocols[128];
+
+#ifdef USE_NGHTTP2
+    if(data->set.httpversion >= CURL_HTTP_VERSION_2) {
+      protocols[cur++] = NGHTTP2_PROTO_VERSION_ID_LEN;
+
+      memcpy(&protocols[cur], NGHTTP2_PROTO_VERSION_ID,
+          NGHTTP2_PROTO_VERSION_ID_LEN);
+      cur += NGHTTP2_PROTO_VERSION_ID_LEN;
+      infof(data, "ALPN, offering %s\n", NGHTTP2_PROTO_VERSION_ID);
+    }
+#endif
+
+    protocols[cur++] = ALPN_HTTP_1_1_LENGTH;
+    memcpy(&protocols[cur], ALPN_HTTP_1_1, ALPN_HTTP_1_1_LENGTH);
+    cur += ALPN_HTTP_1_1_LENGTH;
+    infof(data, "ALPN, offering %s\n", ALPN_HTTP_1_1);
+
+    /* expects length prefixed preference ordered list of protocols in wire
+     * format
+     */
+    SSL_CTX_set_alpn_protos(connssl->ctx, protocols, cur);
+  }
+#endif
+
+#endif
         // -------------------------------------------------
         // connect
         // -------------------------------------------------
         SSL *l_tls = NULL;
-        l_tls = tls_connect(l_ctx, l_host, l_port);
+        l_tls = tls_connect(l_ctx, l_request->m_host, l_request->m_port);
         if(!l_tls)
         {
                 printf("Error performing ssl_connect\n");
@@ -1180,12 +1205,11 @@ int main(int argc, char** argv)
         nghttp2_settings_entry l_iv[1] = {
                 { NGHTTP2_SETTINGS_MAX_CONCURRENT_STREAMS, 100 }
         };
-        int l_rv;
-        /* client 24 bytes magic string will be sent by nghttp2 library */
-        l_rv = nghttp2_submit_settings(l_session->m_session, NGHTTP2_FLAG_NONE, l_iv, ARRLEN(l_iv));
-        if(l_rv != 0)
+        // client 24 bytes magic string will be sent by nghttp2 library
+        l_s = nghttp2_submit_settings(l_session->m_session, NGHTTP2_FLAG_NONE, l_iv, ARRLEN(l_iv));
+        if(l_s != 0)
         {
-                errx(1, "Could not submit SETTINGS: %s", nghttp2_strerror(l_rv));
+                errx(1, "Could not submit SETTINGS: %s", nghttp2_strerror(l_s));
         }
         // -------------------------------------------------
         // send request
@@ -1204,10 +1228,10 @@ int main(int argc, char** argv)
 #define MAKE_NV2(NAME, VALUE)          {(uint8_t *) NAME, (uint8_t *)VALUE, sizeof(NAME) - 1, sizeof(VALUE) - 1, NGHTTP2_NV_FLAG_NONE}
 
         nghttp2_nv l_hdrs[] = {
-                MAKE_NV2( ":method", "GET"),
-                MAKE_NV(  ":path",   l_path.c_str(), l_path.length()),
+                MAKE_NV(  ":method", l_request->m_verb.c_str(), l_request->m_verb.length()),
+                MAKE_NV(  ":path",   l_request->m_url_path.c_str(), l_request->m_url_path.length()),
                 MAKE_NV2( ":scheme", "https"),
-                MAKE_NV(  ":authority", l_host.c_str(), l_host.length()),
+                MAKE_NV(  ":authority", l_request->m_host.c_str(), l_request->m_host.length()),
                 MAKE_NV2( "accept", "*/*"),
                 MAKE_NV2( "user-agent", "nghttp2/" NGHTTP2_VERSION)
         };
