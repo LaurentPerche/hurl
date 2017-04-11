@@ -84,6 +84,23 @@
 #ifndef STATUS_ERROR
 #define STATUS_ERROR -1
 #endif
+// ---------------------------------------------------------
+// ALPN/NPN support borrowed from curl...
+// ---------------------------------------------------------
+// Check for OpenSSL 1.0.2 which has ALPN support.
+#undef HAS_ALPN
+#if OPENSSL_VERSION_NUMBER >= 0x10002000L \
+    && !defined(OPENSSL_NO_TLSEXT)
+#  define HAS_ALPN 1
+#endif
+// Check for OpenSSL 1.0.1 which has NPN support.
+#undef HAS_NPN
+#if OPENSSL_VERSION_NUMBER >= 0x10001000L \
+    && !defined(OPENSSL_NO_TLSEXT) \
+    && !defined(OPENSSL_NO_NEXTPROTONEG)
+#  define HAS_NPN 1
+#endif
+
 //: ----------------------------------------------------------------------------
 //: support routines
 //: ----------------------------------------------------------------------------
@@ -1127,46 +1144,37 @@ int main(int argc, char** argv)
         SSL_CTX_set_mode(l_ctx, SSL_MODE_AUTO_RETRY);
         SSL_CTX_set_mode(l_ctx, SSL_MODE_RELEASE_BUFFERS);
         // set npn callback
-        SSL_CTX_set_next_proto_select_cb(l_ctx, npn_select_next_proto_cb, NULL);
-#if OPENSSL_VERSION_NUMBER >= 0x10002000L
-        SSL_CTX_set_alpn_protos(l_ctx, (const unsigned char *)"\x02h2", 3);
-#endif // OPENSSL_VERSION_NUMBER >= 0x10002000L
-
-#if 0
 #ifdef HAS_NPN
-  if(conn->bits.tls_enable_npn)
-    SSL_CTX_set_next_proto_select_cb(connssl->ctx, select_next_proto_cb, conn);
+        SSL_CTX_set_next_proto_select_cb(l_ctx, npn_select_next_proto_cb, NULL);
 #endif
 
 #ifdef HAS_ALPN
-  if(conn->bits.tls_enable_alpn) {
-    int cur = 0;
-    unsigned char protocols[128];
+#if 0
+        SSL_CTX_set_alpn_protos(l_ctx, (const unsigned char *)"\x02h2", 3);
+#else
+        #define ALPN_HTTP_1_1_LENGTH 8
+        #define ALPN_HTTP_1_1 "http/1.1"
+        int l_cur = 0;
+        unsigned char l_protocols[128];
 
-#ifdef USE_NGHTTP2
-    if(data->set.httpversion >= CURL_HTTP_VERSION_2) {
-      protocols[cur++] = NGHTTP2_PROTO_VERSION_ID_LEN;
+        l_protocols[l_cur++] = NGHTTP2_PROTO_VERSION_ID_LEN;
+        memcpy(&l_protocols[l_cur], NGHTTP2_PROTO_VERSION_ID, NGHTTP2_PROTO_VERSION_ID_LEN);
+        l_cur += NGHTTP2_PROTO_VERSION_ID_LEN;
+        NDBG_PRINT("ALPN, offering %s\n", NGHTTP2_PROTO_VERSION_ID);
 
-      memcpy(&protocols[cur], NGHTTP2_PROTO_VERSION_ID,
-          NGHTTP2_PROTO_VERSION_ID_LEN);
-      cur += NGHTTP2_PROTO_VERSION_ID_LEN;
-      infof(data, "ALPN, offering %s\n", NGHTTP2_PROTO_VERSION_ID);
-    }
+        l_protocols[l_cur++] = ALPN_HTTP_1_1_LENGTH;
+        memcpy(&l_protocols[l_cur], ALPN_HTTP_1_1, ALPN_HTTP_1_1_LENGTH);
+        l_cur += ALPN_HTTP_1_1_LENGTH;
+        NDBG_PRINT("ALPN, offering %s\n", ALPN_HTTP_1_1);
+        // ---------------------------------------
+        // expects length prefixed preference
+        // ordered list of protocols in wire
+        // format
+        // ---------------------------------------
+        SSL_CTX_set_alpn_protos(l_ctx, l_protocols, l_cur);
+#endif
 #endif
 
-    protocols[cur++] = ALPN_HTTP_1_1_LENGTH;
-    memcpy(&protocols[cur], ALPN_HTTP_1_1, ALPN_HTTP_1_1_LENGTH);
-    cur += ALPN_HTTP_1_1_LENGTH;
-    infof(data, "ALPN, offering %s\n", ALPN_HTTP_1_1);
-
-    /* expects length prefixed preference ordered list of protocols in wire
-     * format
-     */
-    SSL_CTX_set_alpn_protos(connssl->ctx, protocols, cur);
-  }
-#endif
-
-#endif
         // -------------------------------------------------
         // connect
         // -------------------------------------------------
@@ -1273,8 +1281,8 @@ int main(int argc, char** argv)
                 // -----------------------------------------
                 char l_buf[16384];
                 l_s = SSL_read(l_tls, l_buf, 16384);
-                //NDBG_PRINT("%sREAD%s: l_s: %d\n", ANSI_COLOR_FG_RED, ANSI_COLOR_OFF, l_s);
-                //if(l_s > 0) mem_display((uint8_t *)l_buf, l_s);
+                NDBG_PRINT("%sREAD%s: l_s: %d\n", ANSI_COLOR_FG_RED, ANSI_COLOR_OFF, l_s);
+                if(l_s > 0) ns_hurl::mem_display((uint8_t *)l_buf, l_s);
                 ssize_t l_rl;
                 l_rl = nghttp2_session_mem_recv(l_session->m_session, (const uint8_t *)l_buf, l_s);
                 if(l_rl < 0)
