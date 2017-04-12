@@ -165,7 +165,6 @@ public:
                 m_host_info(),
                 m_host_resolved(false)
         {};
-
         // -------------------------------------------------
         // Public Static (class) methods
         // -------------------------------------------------
@@ -173,7 +172,6 @@ public:
         static int32_t evr_fd_writeable_cb(void *a_data){return run_state_machine(a_data, ns_hurl::EVR_MODE_WRITE);}
         static int32_t evr_fd_error_cb(void *a_data) {return run_state_machine(a_data, ns_hurl::EVR_MODE_ERROR);}
         static int32_t evr_fd_timeout_cb(void *a_ctx, void *a_data){return run_state_machine(a_data, ns_hurl::EVR_MODE_TIMEOUT);}
-
         ns_hurl::nconn *m_nconn;
         t_phurl *m_t_phurl;
         ns_hurl::evr_timer_t *m_timer_obj;
@@ -191,7 +189,6 @@ public:
         std::string m_tls_info_cipher_str;
         std::string m_tls_info_protocol_str;
         std::string m_error_str;
-
         // address resolution
 #ifdef ASYNC_DNS_SUPPORT
         void *m_adns_lookup_job_handle;
@@ -205,14 +202,11 @@ private:
         // Disallow copy/assign
         request& operator=(const request &);
         request(const request &);
-
         int32_t teardown(ns_hurl::http_status_t a_status);
-
         // -------------------------------------------------
         // Private Static (class) methods
         // -------------------------------------------------
         static int32_t run_state_machine(void *a_data, ns_hurl::evr_mode_t a_conn_mode);
-
         // TODO -subr/rqst/resp/tls info?
 };
 
@@ -301,7 +295,6 @@ typedef std::map <std::string, uint32_t> summary_map_t;
 pthread_mutex_t g_sum_info_mutex;
 summary_map_t g_sum_info_tls_protocols;
 summary_map_t g_sum_info_tls_ciphers;
-
 //: ----------------------------------------------------------------------------
 //: t_hurl
 //: ----------------------------------------------------------------------------
@@ -420,8 +413,6 @@ private:
         // -------------------------------------------------
         bool m_is_initd;
 };
-
-
 //: ----------------------------------------------------------------------------
 //: \details: TODO
 //: \return:  TODO
@@ -901,11 +892,9 @@ int32_t t_phurl::request_start(request &a_request)
         //NDBG_PRINT("Adding http_data: %p.\n", l_clnt_session);
         a_request.m_t_phurl = this;
         a_request.m_timer_obj = NULL;
-
         // Setup clnt_session
         a_request.m_nconn = l_nconn;
         l_nconn->set_data(&a_request);
-
         // ---------------------------------------
         // setup resp
         // ---------------------------------------
@@ -924,7 +913,6 @@ int32_t t_phurl::request_start(request &a_request)
         l_nconn->set_read_cb_data(a_request.m_resp);
         // TODO
         //a_request.m_resp->m_expect_resp_body_flag = a_request.m_expect_resp_body_flag;
-
         // setup q's
         if(!a_request.m_in_q)
         {
@@ -950,7 +938,6 @@ int32_t t_phurl::request_start(request &a_request)
         {
                 return request::evr_fd_error_cb(l_nconn);
         }
-
         // ---------------------------------------
         // idle timer
         // ---------------------------------------
@@ -964,7 +951,6 @@ int32_t t_phurl::request_start(request &a_request)
         {
                 return request::evr_fd_error_cb(l_nconn);
         }
-
         // ---------------------------------------
         // Display data from out q
         // ---------------------------------------
@@ -982,14 +968,12 @@ int32_t t_phurl::request_start(request &a_request)
         ++g_req_num_in_flight;
         return request::evr_fd_writeable_cb(l_nconn);
 }
-
 //: ----------------------------------------------------------------------------
 //: \details: TODO
 //: \return:  TODO
 //: \param:   TODO
 //: ----------------------------------------------------------------------------
-#define _SET_NCONN_OPT(_conn, _opt, _buf, _len) \
-        do { \
+#define _SET_NCONN_OPT(_conn, _opt, _buf, _len) do { \
                 int _status = 0; \
                 _status = _conn->set_opt((_opt), (_buf), (_len)); \
                 if (_status != ns_hurl::nconn::NC_STATUS_OK) { \
@@ -998,8 +982,6 @@ int32_t t_phurl::request_start(request &a_request)
                         return NULL;\
                 } \
         } while(0)
-
-
 ns_hurl::nconn *t_phurl::create_new_nconn(const request &a_request)
 {
         ns_hurl::nconn *l_nconn = NULL;
@@ -1024,7 +1006,6 @@ ns_hurl::nconn *t_phurl::create_new_nconn(const request &a_request)
                 {
                         _SET_NCONN_OPT(l_nconn, ns_hurl::nconn_tls::OPT_TLS_HOSTNAME, a_request.m_host.c_str(), a_request.m_host.length());
                 }
-
         }
         else if(g_conf_url_scheme == ns_hurl::SCHEME_TCP)
         {

@@ -579,13 +579,6 @@ public:
         request *m_request;
         uint64_t m_idx;
         // -------------------------------------------------
-        // Public Static (class) methods
-        // -------------------------------------------------
-        static int32_t evr_fd_readable_cb(void *a_data) {return run_state_machine(a_data, ns_hurl::EVR_MODE_READ);}
-        static int32_t evr_fd_writeable_cb(void *a_data){return run_state_machine(a_data, ns_hurl::EVR_MODE_WRITE);}
-        static int32_t evr_fd_error_cb(void *a_data) {return run_state_machine(a_data, ns_hurl::EVR_MODE_ERROR);}
-        static int32_t evr_fd_timeout_cb(void *a_ctx, void *a_data){return run_state_machine(a_data, ns_hurl::EVR_MODE_TIMEOUT);}
-        // -------------------------------------------------
         // Public methods
         // -------------------------------------------------
         session(void):
@@ -603,7 +596,6 @@ public:
                 m_timeout_ms(10000)
 #endif
         {}
-
         ~session(void)
         {
                 if(m_nconn)
@@ -627,7 +619,6 @@ public:
                         m_out_q = NULL;
                 }
         }
-
         int32_t cancel_timer(void *a_timer);
         int32_t teardown(ns_hurl::http_status_t a_status);
         int32_t request_error(ns_hurl::http_status_t a_status);
@@ -640,6 +631,13 @@ public:
         uint64_t get_last_active_ms(void);
         void set_last_active_ms(uint64_t a_time_ms);
 #endif
+        // -------------------------------------------------
+        // Public Static (class) methods
+        // -------------------------------------------------
+        static int32_t evr_fd_readable_cb(void *a_data) {return run_state_machine(a_data, ns_hurl::EVR_MODE_READ);}
+        static int32_t evr_fd_writeable_cb(void *a_data){return run_state_machine(a_data, ns_hurl::EVR_MODE_WRITE);}
+        static int32_t evr_fd_error_cb(void *a_data) {return run_state_machine(a_data, ns_hurl::EVR_MODE_ERROR);}
+        static int32_t evr_fd_timeout_cb(void *a_ctx, void *a_data){return run_state_machine(a_data, ns_hurl::EVR_MODE_TIMEOUT);}
 private:
         // -------------------------------------------------
         // Private methods
@@ -649,7 +647,6 @@ private:
         session(const session &);
         bool request_complete(void);
         void request_log_status(uint16_t a_status = 0);
-
         // -------------------------------------------------
         // Private Static (class) methods
         // -------------------------------------------------
@@ -1096,8 +1093,6 @@ int32_t session::teardown(ns_hurl::http_status_t a_status)
         }
         return HURL_STATUS_OK;
 }
-
-
 //: ----------------------------------------------------------------------------
 //: \details: TODO
 //: \return:  TODO
@@ -1440,7 +1435,6 @@ idle_check:
 done:
         return HURL_STATUS_OK;
 }
-
 //: ----------------------------------------------------------------------------
 //: \details: TODO
 //: \return:  TODO
@@ -3037,14 +3031,12 @@ int main(int argc, char** argv)
                 }
                 }
         }
-
         // Verify input
         if(!l_input_flag)
         {
                 fprintf(stdout, "Error: Input url/url file/playback file required.");
                 print_usage(stdout, -1);
         }
-
         // -------------------------------------------
         // Add url from command line
         // -------------------------------------------
@@ -3053,7 +3045,6 @@ int main(int argc, char** argv)
                 fprintf(stdout, "Error: No specified URL on cmd line.\n");
                 print_usage(stdout, -1);
         }
-
         // -------------------------------------------------
         // Get resource limits
         // -------------------------------------------------
@@ -3072,7 +3063,6 @@ int main(int argc, char** argv)
                                 g_num_threads, g_num_parallel, (uint32_t)l_rlim.rlim_cur);
                 return HURL_STATUS_ERROR;
         }
-
         // -------------------------------------------
         // Sigint handler
         // -------------------------------------------
@@ -3081,7 +3071,6 @@ int main(int argc, char** argv)
                 printf("Error: can't catch SIGINT\n");
                 return HURL_STATUS_ERROR;
         }
-
         // -------------------------------------------
         // Add url from command line
         // -------------------------------------------
@@ -3094,7 +3083,6 @@ int main(int argc, char** argv)
                 return HURL_STATUS_ERROR;
         }
         l_request->m_completion_cb = s_completion_cb;
-
         // -------------------------------------------
         // Paths...
         // -------------------------------------------
@@ -3118,7 +3106,6 @@ int main(int argc, char** argv)
         {
                 g_path = l_raw_path;
         }
-
 #ifdef ENABLE_PROFILER
         // Start Profiler
         if (!l_gprof_file.empty())
@@ -3126,8 +3113,9 @@ int main(int argc, char** argv)
                 ProfilerStart(l_gprof_file.c_str());
         }
 #endif
-
-        // Message
+        // -------------------------------------------
+        // message
+        // -------------------------------------------
         if(!g_quiet && !g_verbose)
         {
                 if(g_reqs_per_conn < 0)
@@ -3141,7 +3129,6 @@ int main(int argc, char** argv)
                                         g_num_threads, g_num_parallel, g_reqs_per_conn);
                 }
         }
-
         // -------------------------------------------
         // resolve
         // -------------------------------------------
@@ -3153,9 +3140,8 @@ int main(int argc, char** argv)
                 return HURL_STATUS_ERROR;
         }
         l_request->m_host_info = l_host_info;
-
         // -------------------------------------------
-        // Init
+        // init
         // -------------------------------------------
         for(uint32_t i_t = 0; i_t < g_num_threads; ++i_t)
         {
@@ -3175,9 +3161,8 @@ int main(int argc, char** argv)
                 l_t_hurl->init();
                 // TODO Check status
         }
-
         // -------------------------------------------
-        // Run
+        // run
         // -------------------------------------------
         g_start_time_ms = ns_hurl::get_time_ms();;
         for(t_hurl_list_t::iterator i_t = g_t_hurl_list.begin();
@@ -3188,15 +3173,13 @@ int main(int argc, char** argv)
                 (*i_t)->run();
                 // TODO Check status
         }
-
         // -------------------------------------------
-        // Run command exec
+        // run command exec
         // -------------------------------------------
         command_exec();
         uint64_t l_end_time_ms = ns_hurl::get_time_ms() - g_start_time_ms;
-
         // -------------------------------------------
-        // Stop
+        // stop
         // -------------------------------------------
         for(t_hurl_list_t::iterator i_t = g_t_hurl_list.begin();
             i_t != g_t_hurl_list.end();
@@ -3204,7 +3187,6 @@ int main(int argc, char** argv)
         {
                 (*i_t)->stop();
         }
-
         // -------------------------------------------
         // Join all threads before exit
         // -------------------------------------------

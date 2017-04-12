@@ -29,9 +29,14 @@
 #include "hurl/status.h"
 #include "hurl/nconn/scheme.h"
 #include "hurl/nconn/host_info.h"
+#include "hurl/nconn/nconn.h"
+#include "hurl/nconn/nconn_tcp.h"
+#include "hurl/nconn/nconn_tls.h"
 #include "hurl/support/kv_map_list.h"
 #include "hurl/support/string_util.h"
 #include "hurl/support/tls_util.h"
+#include "hurl/dns/nlookup.h"
+#include "hurl/http/http_status.h"
 
 // internal
 #include "support/ndebug.h"
@@ -69,13 +74,6 @@
 
 #include <string>
 //: ----------------------------------------------------------------------------
-//: macros
-//: ----------------------------------------------------------------------------
-#ifndef _U_
-#define _U_ __attribute__((unused))
-#endif
-#define ARRLEN(x) (sizeof(x) / sizeof(x[0]))
-//: ----------------------------------------------------------------------------
 //: constants
 //: ----------------------------------------------------------------------------
 #ifndef STATUS_OK
@@ -87,6 +85,8 @@
 // ---------------------------------------------------------
 // ALPN/NPN support borrowed from curl...
 // ---------------------------------------------------------
+#define ALPN_HTTP_1_1_LENGTH 8
+#define ALPN_HTTP_1_1 "http/1.1"
 // Check for OpenSSL 1.0.2 which has ALPN support.
 #undef HAS_ALPN
 #if OPENSSL_VERSION_NUMBER >= 0x10002000L \
@@ -100,143 +100,67 @@
     && !defined(OPENSSL_NO_NEXTPROTONEG)
 #  define HAS_NPN 1
 #endif
+//: ----------------------------------------------------------------------------
+//: macros
+//: ----------------------------------------------------------------------------
+#ifndef _U_
+#define _U_ __attribute__((unused))
+#endif
+#ifndef ARRLEN
+#define ARRLEN(x) (sizeof(x) / sizeof(x[0]))
+#endif
+#ifndef _SET_NCONN_OPT
+#define _SET_NCONN_OPT(_conn, _opt, _buf, _len) do { \
+                int _status = 0; \
+                _status = _conn->set_opt((_opt), (_buf), (_len)); \
+                if (_status != ns_hurl::nconn::NC_STATUS_OK) { \
+                        delete _conn;\
+                        _conn = NULL;\
+                        return STATUS_ERROR;\
+                } \
+        } while(0)
+#endif
+#ifndef CHECK_FOR_NULL_ERROR_DEBUG
+#define CHECK_FOR_NULL_ERROR_DEBUG(_data) \
+        do {\
+                if(!_data) {\
+                        NDBG_PRINT("Error.\n");\
+                        return STATUS_ERROR;\
+                }\
+        } while(0);
+#endif
+#ifndef CHECK_FOR_NULL_ERROR
+#define CHECK_FOR_NULL_ERROR(_data) \
+        do {\
+                if(!_data) {\
+                        return STATUS_ERROR;\
+                }\
+        } while(0);
+#endif
+//: ----------------------------------------------------------------------------
+//: fwd decl's
+//: ----------------------------------------------------------------------------
+static int npn_select_next_proto_cb(SSL *a_ssl,
+                                    unsigned char **a_out,
+                                    unsigned char *a_outlen,
+                                    const unsigned char *a_in,
+                                    unsigned int a_inlen,
+                                    void *a_arg);
 
-//: ----------------------------------------------------------------------------
-//: support routines
-//: ----------------------------------------------------------------------------
-//: ----------------------------------------------------------------------------
-//: \details: Host info
-//: ----------------------------------------------------------------------------
-struct host_info {
-        struct sockaddr_storage m_sa;
-        int m_sa_len;
-        int m_sock_family;
-        int m_sock_type;
-        int m_sock_protocol;
-        host_info():
-                m_sa(),
-                m_sa_len(16),
-                m_sock_family(AF_UNSPEC),
-                m_sock_type(SOCK_STREAM),
-                m_sock_protocol(IPPROTO_TCP)
-        {((struct sockaddr_in *)(&m_sa))->sin_family = AF_INET;}
-};
-//: ----------------------------------------------------------------------------
-//: \details: slow resolution
-//: \return:  TODO
-//: \param:   TODO
-//: ----------------------------------------------------------------------------
-static int32_t nlookup(const std::string &a_host, uint16_t a_port, host_info &ao_host_info)
-{
-        // Initialize...
-        ao_host_info.m_sa_len = sizeof(ao_host_info.m_sa);
-        memset((void*) &(ao_host_info.m_sa), 0, ao_host_info.m_sa_len);
-        // ---------------------------------------
-        // get address...
-        // ---------------------------------------
-        struct addrinfo l_hints;
-        memset(&l_hints, 0, sizeof(l_hints));
-        l_hints.ai_family = PF_UNSPEC;
-        l_hints.ai_socktype = SOCK_STREAM;
-        char portstr[10];
-        snprintf(portstr, sizeof(portstr), "%d", (int) a_port);
-        struct addrinfo* l_addrinfo;
-        int l_gaierr;
-        l_gaierr = getaddrinfo(a_host.c_str(), portstr, &l_hints, &l_addrinfo);
-        if (l_gaierr != 0)
-        {
-                //printf("Error getaddrinfo '%s': %s\n",
-                //           a_host.c_str(), gai_strerror(l_gaierr));
-                return -1;
-        }
-        // Find the first IPv4 and IPv6 entries.
-        struct addrinfo* l_addrinfo_v4 = NULL;
-        struct addrinfo* l_addrinfo_v6 = NULL;
-        for (struct addrinfo* i_addrinfo = l_addrinfo;
-             i_addrinfo != (struct addrinfo*) 0;
-             i_addrinfo = i_addrinfo->ai_next)
-        {
-                switch (i_addrinfo->ai_family)
-                {
-                case AF_INET:
-                {
-                        if (l_addrinfo_v4 == (struct addrinfo*) 0)
-                                l_addrinfo_v4 = i_addrinfo;
-                        break;
-                }
-                case AF_INET6:
-                {
-                        if (l_addrinfo_v6 == (struct addrinfo*) 0)
-                                l_addrinfo_v6 = i_addrinfo;
-                        break;
-                }
-                }
-        }
-        //printf("RESOLVE:\n");
-        // If there's an IPv4 address, use that, otherwise try IPv6.
-        if (l_addrinfo_v4 != NULL)
-        {
-                if (sizeof(ao_host_info.m_sa) < l_addrinfo_v4->ai_addrlen)
-                {
-                        printf("Error %s - sockaddr too small (%lu < %lu)\n",
-                                   a_host.c_str(),
-                              (unsigned long) sizeof(ao_host_info.m_sa),
-                              (unsigned long) l_addrinfo_v4->ai_addrlen);
-                        return -1;
-                }
-                ao_host_info.m_sock_family = l_addrinfo_v4->ai_family;
-                ao_host_info.m_sock_type = l_addrinfo_v4->ai_socktype;
-                ao_host_info.m_sock_protocol = l_addrinfo_v4->ai_protocol;
-                ao_host_info.m_sa_len = l_addrinfo_v4->ai_addrlen;
-                //printf("memmove: addrlen: %d\n", l_addrinfo_v4->ai_addrlen);
-                //ns_hlx::mem_display((const uint8_t *)l_addrinfo_v4->ai_addr,
-                //                   l_addrinfo_v4->ai_addrlen);
-                //show_host_info();
-                memmove(&(ao_host_info.m_sa),
-                        l_addrinfo_v4->ai_addr,
-                        l_addrinfo_v4->ai_addrlen);
-                // Set the port
-                ((sockaddr_in *)(&(ao_host_info.m_sa)))->sin_port = htons(a_port);
-                freeaddrinfo(l_addrinfo);
-        }
-        else if (l_addrinfo_v6 != NULL)
-        {
-                if (sizeof(ao_host_info.m_sa) < l_addrinfo_v6->ai_addrlen)
-                {
-                        printf("Error %s - sockaddr too small (%lu < %lu)\n",
-                                   a_host.c_str(),
-                              (unsigned long) sizeof(ao_host_info.m_sa),
-                              (unsigned long) l_addrinfo_v6->ai_addrlen);
-                        return -1;
-                }
-                ao_host_info.m_sock_family = l_addrinfo_v6->ai_family;
-                ao_host_info.m_sock_type = l_addrinfo_v6->ai_socktype;
-                ao_host_info.m_sock_protocol = l_addrinfo_v6->ai_protocol;
-                ao_host_info.m_sa_len = l_addrinfo_v6->ai_addrlen;
-                //printf("memmove: addrlen: %d\n", l_addrinfo_v6->ai_addrlen);
-                //ns_hlx::mem_display((const uint8_t *)l_addrinfo_v6->ai_addr,
-                //                    l_addrinfo_v6->ai_addrlen);
-                //show_host_info();
-                memmove(&ao_host_info.m_sa,
-                        l_addrinfo_v6->ai_addr,
-                        l_addrinfo_v6->ai_addrlen);
-                // Set the port
-                ((sockaddr_in6 *)(&(ao_host_info.m_sa)))->sin6_port = htons(a_port);
-                freeaddrinfo(l_addrinfo);
-        }
-        else
-        {
-                printf("Error no valid address found for host %s\n",
-                           a_host.c_str());
-                return -1;
-        }
-        return 0;
-}
+static int npn_select_next_proto_advertised_cb(SSL *a_ssl,
+                                               const unsigned char **a_out,
+                                               unsigned int *a_outlen,
+                                               void *a_arg);
 //: ----------------------------------------------------------------------------
 //: request object/meta
 //: ----------------------------------------------------------------------------
 class request {
 public:
+        typedef enum {
+                HTTP_PROTOCOL_V1_TCP = 0,
+                HTTP_PROTOCOL_V1_TLS,
+                HTTP_PROTOCOL_V2_TLS
+        } http_protocol_type_t;
         // -------------------------------------------------
         // public methods
         // -------------------------------------------------
@@ -252,10 +176,45 @@ public:
                 m_body_data_len(0),
                 m_port(0),
                 m_expect_resp_body_flag(true),
-                m_host_info()
+                m_evr_loop(NULL),
+                m_tls_ctx(NULL),
+                m_tls(NULL),
+                m_nconn(NULL),
+                m_ngxxx_session(NULL),
+                m_ngxxx_session_stream_id(-1),
+                m_ngxxx_session_stream_closed(false),
+                m_conf_hp_type(HTTP_PROTOCOL_V2_TLS),
+                m_conf_tls_cipher_list(),
+                m_conf_tls_options(),
+                m_conf_tls_verify(),
+                m_conf_tls_sni(),
+                m_conf_tls_self_ok(),
+                m_conf_tls_no_host_check(),
+                m_conf_tls_ca_file(),
+                m_conf_tls_ca_path()
         {};
-        int set_header(const std::string &a_key, const std::string &a_val);
+        ~request()
+        {
+                if(m_tls)
+                {
+                        SSL_shutdown(m_tls);
+                        m_tls = NULL;
+                }
+                if(m_tls_ctx)
+                {
+                        SSL_CTX_free(m_tls_ctx);
+                        m_tls_ctx = NULL;
+                }
+        }
+        int32_t set_header(const std::string &a_key, const std::string &a_val);
         int32_t init_with_url(const std::string &a_url);
+        // -------------------------------------------------
+        // Public Static (class) methods
+        // -------------------------------------------------
+        static int32_t evr_fd_readable_cb(void *a_data) {return run_state_machine(a_data, ns_hurl::EVR_MODE_READ);}
+        static int32_t evr_fd_writeable_cb(void *a_data){return run_state_machine(a_data, ns_hurl::EVR_MODE_WRITE);}
+        static int32_t evr_fd_error_cb(void *a_data) {return run_state_machine(a_data, ns_hurl::EVR_MODE_ERROR);}
+        static int32_t evr_fd_timeout_cb(void *a_ctx, void *a_data){return run_state_machine(a_data, ns_hurl::EVR_MODE_TIMEOUT);}
         // -------------------------------------------------
         // public members
         // -------------------------------------------------
@@ -270,7 +229,23 @@ public:
         uint32_t m_body_data_len;
         uint16_t m_port;
         bool m_expect_resp_body_flag;
-        ns_hurl::host_info m_host_info;
+        ns_hurl::evr_loop *m_evr_loop;
+        SSL_CTX *m_tls_ctx;
+        SSL *m_tls;
+        ns_hurl::nconn *m_nconn;
+        nghttp2_session *m_ngxxx_session;
+        int32_t m_ngxxx_session_stream_id;
+        bool m_ngxxx_session_stream_closed;
+        // conf options
+        http_protocol_type_t m_conf_hp_type;
+        std::string m_conf_tls_cipher_list;
+        long m_conf_tls_options;
+        bool m_conf_tls_verify;
+        bool m_conf_tls_sni;
+        bool m_conf_tls_self_ok;
+        bool m_conf_tls_no_host_check;
+        std::string m_conf_tls_ca_file;
+        std::string m_conf_tls_ca_path;
 private:
         // -------------------------------------------------
         // private methods
@@ -278,13 +253,190 @@ private:
         // Disallow copy/assign
         request(const request &);
         request& operator=(const request &);
+        int32_t teardown(ns_hurl::http_status_t a_status);
+        // -------------------------------------------------
+        // Private Static (class) methods
+        // -------------------------------------------------
+        static int32_t run_state_machine(void *a_data, ns_hurl::evr_mode_t a_conn_mode);
 };
+//: ****************************************************************************
+//: ******************** N G H T T P 2   S U P P O R T *************************
+//: ****************************************************************************
+//: ----------------------------------------------------------------------------
+//: Types
+//: ----------------------------------------------------------------------------
+//: ----------------------------------------------------------------------------
+//: \details: nghttp2_send_callback. Here we transmit the |data|, |length| bytes,
+//:           to the network. Because we are using libevent bufferevent, we just
+//:           write those bytes into bufferevent buffer
+//: \return:  TODO
+//: \param:   TODO
+//: ----------------------------------------------------------------------------
+static ssize_t ngxxx_send_cb(nghttp2_session *a_session _U_,
+                             const uint8_t *a_data,
+                             size_t a_length,
+                             int a_flags _U_,
+                             void *a_user_data)
+{
+        request *l_request = (request *)a_user_data;
+        //NDBG_PRINT("SEND_CB\n");
+        //ns_hurl::mem_display(a_data, a_length);
+        int l_s;
+        l_s = SSL_write(l_request->m_tls, a_data, a_length);
+        //NDBG_PRINT("%sWRITE%s: l_s: %d\n", ANSI_COLOR_FG_BLUE, ANSI_COLOR_OFF, l_s);
+        if((l_s < 0) ||
+           ((size_t)l_s < a_length))
+        {
+                NDBG_PRINT("Error performing SSL_write: l_s: %d\n", l_s);
+                return -1;
+        }
+        return (ssize_t)l_s;
+}
+//: ----------------------------------------------------------------------------
+//: \details: nghttp2_on_frame_recv_callback: Called when nghttp2 library
+//:           received a complete frame from the remote peer.
+//: \return:  TODO
+//: \param:   TODO
+//: ----------------------------------------------------------------------------
+static int ngxxx_frame_recv_cb(nghttp2_session *a_session,
+                               const nghttp2_frame *a_frame,
+                               void *a_user_data)
+{
+        //NDBG_PRINT("%sFRAME%s: TYPE[%6u]\n", ANSI_COLOR_BG_MAGENTA, ANSI_COLOR_OFF, a_frame->hd.type);
+        request *l_request = (request *)a_user_data;
+        switch (a_frame->hd.type)
+        {
+        case NGHTTP2_HEADERS:
+        {
+                if((a_frame->headers.cat == NGHTTP2_HCAT_RESPONSE) &&
+                   (l_request->m_ngxxx_session_stream_id == a_frame->hd.stream_id))
+                {
+                        //fprintf(stderr, "All headers received\n");
+                }
+                break;
+        }
+        }
+        return 0;
+
+}
+//: ----------------------------------------------------------------------------
+//: \details: nghttp2_on_data_chunk_recv_callback: Called when DATA frame is
+//:           received from the remote peer. In this implementation, if the frame
+//:           is meant to the stream we initiated, print the received data in
+//:           stdout, so that the user can redirect its output to the file
+//:           easily.
+//: \return:  TODO
+//: \param:   TODO
+//: ----------------------------------------------------------------------------
+static int ngxxx_data_chunk_recv_cb(nghttp2_session *a_session _U_,
+                                    uint8_t a_flags _U_,
+                                    int32_t a_stream_id,
+                                    const uint8_t *a_data,
+                                    size_t a_len,
+                                    void *a_user_data)
+{
+        //NDBG_PRINT("%sCHUNK%s: \n", ANSI_COLOR_BG_BLUE, ANSI_COLOR_OFF);
+        request *l_request = (request *)a_user_data;
+        if(l_request->m_ngxxx_session_stream_id == a_stream_id)
+        {
+                fwrite(a_data, a_len, 1, stdout);
+        }
+        return 0;
+}
+//: ----------------------------------------------------------------------------
+//: \details: nghttp2_on_stream_close_callback: Called when a stream is about to
+//:           closed. This example program only deals with 1 HTTP request (1
+//:           stream), if it is closed, we send GOAWAY and tear down the
+//:           session
+//: \return:  TODO
+//: \param:   TODO
+//: ----------------------------------------------------------------------------
+static int ngxxx_stream_close_cb(nghttp2_session *a_session,
+                                 int32_t a_stream_id,
+                                 uint32_t a_error_code,
+                                 void *a_user_data)
+{
+        //NDBG_PRINT("%sCLOSE%s: \n", ANSI_COLOR_BG_RED, ANSI_COLOR_OFF);
+        request *l_request = (request *)a_user_data;
+        int l_rv;
+        l_request->m_ngxxx_session_stream_closed = true;
+        if(l_request->m_ngxxx_session_stream_id == a_stream_id)
+        {
+                //fprintf(stderr, "Stream %d closed with error_code=%d\n", a_stream_id, a_error_code);
+                l_rv = nghttp2_session_terminate_session(a_session, NGHTTP2_NO_ERROR);
+                if (l_rv != 0)
+                {
+                        return NGHTTP2_ERR_CALLBACK_FAILURE;
+                }
+        }
+        return 0;
+
+}
+//: ----------------------------------------------------------------------------
+//: \details: nghttp2_on_header_callback: Called when nghttp2 library emits
+//:           single header name/value pair
+//: \return:  TODO
+//: \param:   TODO
+//: ----------------------------------------------------------------------------
+static int ngxxx_header_cb(nghttp2_session *a_session _U_,
+                           const nghttp2_frame *a_frame,
+                           const uint8_t *a_name,
+                           size_t a_namelen,
+                           const uint8_t *a_value,
+                           size_t a_valuelen,
+                           uint8_t a_flags _U_,
+                           void *a_user_data)
+{
+        //NDBG_PRINT("%sHEADER%s: \n", ANSI_COLOR_BG_YELLOW, ANSI_COLOR_OFF);
+        request *l_request = (request *)a_user_data;
+        switch (a_frame->hd.type)
+        {
+        case NGHTTP2_HEADERS:
+                if((a_frame->headers.cat == NGHTTP2_HCAT_RESPONSE) &&
+                   (l_request->m_ngxxx_session_stream_id == a_frame->hd.stream_id))
+                {
+                        // Print response headers for the initiated request.
+                        fprintf(stdout, "%s%.*s%s: %s%.*s%s\n",
+                                ANSI_COLOR_FG_BLUE, (int)a_namelen, a_name, ANSI_COLOR_OFF,
+                                ANSI_COLOR_FG_GREEN, (int)a_valuelen, a_value, ANSI_COLOR_OFF);
+                        break;
+                }
+        }
+        return 0;
+}
+//: ----------------------------------------------------------------------------
+//: \details: nghttp2_on_begin_headers_callback:
+//:           Called when nghttp2 library gets started to receive header block.
+//: \return:  TODO
+//: \param:   TODO
+//: ----------------------------------------------------------------------------
+static int ngxxx_begin_headers_cb(nghttp2_session *a_session _U_,
+                                  const nghttp2_frame *a_frame,
+                                  void *a_user_data)
+{
+        //NDBG_PRINT("%sBEGIN_HEADERS%s: \n", ANSI_COLOR_BG_WHITE, ANSI_COLOR_OFF);
+        request *l_request = (request *)a_user_data;
+        switch (a_frame->hd.type)
+        {
+        case NGHTTP2_HEADERS:
+                if((a_frame->headers.cat == NGHTTP2_HCAT_RESPONSE) &&
+                  (l_request->m_ngxxx_session_stream_id == a_frame->hd.stream_id))
+                {
+                        //fprintf(stderr, "Response headers for stream ID=%d:\n", a_frame->hd.stream_id);
+                }
+                break;
+        }
+        return 0;
+}
+//: ----------------------------------------------------------------------------
+//: support routines
+//: ----------------------------------------------------------------------------
 //: ----------------------------------------------------------------------------
 //: \details: TODO
 //: \return:  TODO
 //: \param:   TODO
 //: ----------------------------------------------------------------------------
-int request::set_header(const std::string &a_key, const std::string &a_val)
+int32_t request::set_header(const std::string &a_key, const std::string &a_val)
 {
         ns_hurl::kv_map_list_t::iterator i_obj = m_headers.find(a_key);
         if(i_obj != m_headers.end())
@@ -322,7 +474,7 @@ int request::set_header(const std::string &a_key, const std::string &a_val)
                 l_list.push_back(a_val);
                 m_headers[a_key] = l_list;
         }
-        return HURL_STATUS_OK;
+        return STATUS_OK;
 }
 //: ----------------------------------------------------------------------------
 //: \details: TODO
@@ -331,14 +483,15 @@ int request::set_header(const std::string &a_key, const std::string &a_val)
 //: ----------------------------------------------------------------------------
 int32_t request::init_with_url(const std::string &a_url)
 {
+        // -------------------------------------------------
+        // parse url
+        // -------------------------------------------------
         std::string l_url_fixed = a_url;
         // Find scheme prefix "://"
         if(a_url.find("://", 0) == std::string::npos)
         {
                 l_url_fixed = "http://" + a_url;
         }
-        //NDBG_PRINT("Parse url:           %s\n", a_url.c_str());
-        //NDBG_PRINT("Parse a_wildcarding: %d\n", a_wildcarding);
         http_parser_url l_url;
         http_parser_url_init(&l_url);
         // silence bleating memory sanitizers...
@@ -349,7 +502,7 @@ int32_t request::init_with_url(const std::string &a_url)
         {
                 NDBG_PRINT("Error parsing url: %s\n", l_url_fixed.c_str());
                 // TODO get error msg from http_parser
-                return HURL_STATUS_ERROR;
+                return STATUS_ERROR;
         }
         // Set no port
         m_port = 0;
@@ -379,7 +532,7 @@ int32_t request::init_with_url(const std::string &a_url)
                                 else
                                 {
                                         NDBG_PRINT("Error schema[%s] is unsupported\n", l_part.c_str());
-                                        return HURL_STATUS_ERROR;
+                                        return STATUS_ERROR;
                                 }
                                 break;
                         }
@@ -432,7 +585,9 @@ int32_t request::init_with_url(const std::string &a_url)
                         }
                 }
         }
-        // Default ports
+        // -------------------------------------------------
+        // ports
+        // -------------------------------------------------
         if(!m_port)
         {
                 switch(m_scheme)
@@ -454,22 +609,551 @@ int32_t request::init_with_url(const std::string &a_url)
                 }
                 }
         }
+        // -------------------------------------------------
+        // int path if empty
+        // -------------------------------------------------
         if(m_url_path.empty())
         {
                 m_url_path = "/";
         }
+        // -------------------------------------------------
+        // setup ctx
+        // -------------------------------------------------
         //m_num_to_req = m_path_vector.size();
         //NDBG_PRINT("Showing parsed url.\n");
         //m_url.show();
-        if (HURL_STATUS_OK != l_status)
-        {
-                // Failure
-                NDBG_PRINT("Error parsing url: %s.\n", l_url_fixed.c_str());
-                return HURL_STATUS_ERROR;
-        }
         //NDBG_PRINT("Parsed url: %s\n", l_url_fixed.c_str());
-        return HURL_STATUS_OK;
+        m_conf_hp_type = HTTP_PROTOCOL_V2_TLS;
+        if(m_scheme == ns_hurl::SCHEME_TCP)
+        {
+                m_conf_hp_type = HTTP_PROTOCOL_V1_TCP;
+        }
+        // -------------------------------------------------
+        // init tls...
+        // -------------------------------------------------
+        if(m_scheme == ns_hurl::SCHEME_TLS)
+        {
+                m_conf_hp_type = HTTP_PROTOCOL_V1_TLS;
+                ns_hurl::tls_init();
+                std::string l_unused;
+                m_tls_ctx = ns_hurl::tls_init_ctx(m_conf_tls_cipher_list, // ctx cipher list str
+                                                  m_conf_tls_options,     // ctx options
+                                                  m_conf_tls_ca_file,     // ctx ca file
+                                                  m_conf_tls_ca_path,     // ctx ca path
+                                                  false,                  // is server?
+                                                  l_unused,               // tls key
+                                                  l_unused);              // tls crt
+                // modes from nghttp2 client example
+                SSL_CTX_set_mode(m_tls_ctx, SSL_MODE_AUTO_RETRY);
+                SSL_CTX_set_mode(m_tls_ctx, SSL_MODE_RELEASE_BUFFERS);
+#ifdef HAS_NPN
+                NDBG_PRINT("setting npn callback\n");
+                // set npn callback
+                SSL_CTX_set_next_proto_select_cb(m_tls_ctx, npn_select_next_proto_cb, this);
+                SSL_CTX_set_next_protos_advertised_cb(m_tls_ctx, npn_select_next_proto_advertised_cb, this);
+#endif
+#if 0
+#ifdef HAS_ALPN
+                // ---------------------------------------
+                // set alpn protocols list
+                // ---------------------------------------
+                int l_cur = 0;
+                unsigned char l_protocols[128];
+                // ---------------------------------------
+                // add h2 protocol
+                // ---------------------------------------
+                l_protocols[l_cur++] = NGHTTP2_PROTO_VERSION_ID_LEN;
+                memcpy(&l_protocols[l_cur], NGHTTP2_PROTO_VERSION_ID, NGHTTP2_PROTO_VERSION_ID_LEN);
+                l_cur += NGHTTP2_PROTO_VERSION_ID_LEN;
+                NDBG_PRINT("ALPN, offering %s\n", NGHTTP2_PROTO_VERSION_ID);
+                // ---------------------------------------
+                // add http/1.1 protocol
+                // ---------------------------------------
+                l_protocols[l_cur++] = ALPN_HTTP_1_1_LENGTH;
+                memcpy(&l_protocols[l_cur], ALPN_HTTP_1_1, ALPN_HTTP_1_1_LENGTH);
+                l_cur += ALPN_HTTP_1_1_LENGTH;
+                NDBG_PRINT("ALPN, offering %s\n", ALPN_HTTP_1_1);
+                // ---------------------------------------
+                // expects length prefixed preference
+                // ordered list of protocols in wire
+                // format
+                // ---------------------------------------
+                SSL_CTX_set_alpn_protos(m_tls_ctx, l_protocols, l_cur);
+#endif
+#endif
+        }
+        // -------------------------------------------------
+        // evr loop
+        // -------------------------------------------------
+        // TODO -make loop configurable
+#if defined(__linux__)
+        m_evr_loop = new ns_hurl::evr_loop(ns_hurl::EVR_LOOP_EPOLL, 512);
+#elif defined(__FreeBSD__) || defined(__APPLE__)
+        m_evr_loop = new ns_hurl::evr_loop(ns_hurl::EVR_LOOP_SELECT, 512);
+#else
+        m_evr_loop = new ns_hurl::evr_loop(ns_hurl::EVR_LOOP_SELECT, 512);
+#endif
+        if(!m_evr_loop)
+        {
+                return STATUS_ERROR;
+        }
+        // -------------------------------------------------
+        // create connection
+        // -------------------------------------------------
+        if(m_scheme == ns_hurl::SCHEME_TLS)
+        {
+                m_nconn = new ns_hurl::nconn_tls();
+                _SET_NCONN_OPT(m_nconn, ns_hurl::nconn_tls::OPT_TLS_CTX, m_tls_ctx,sizeof(m_tls_ctx));
+                _SET_NCONN_OPT(m_nconn, ns_hurl::nconn_tls::OPT_TLS_CIPHER_STR,m_conf_tls_cipher_list.c_str(),m_conf_tls_cipher_list.length());
+                _SET_NCONN_OPT(m_nconn, ns_hurl::nconn_tls::OPT_TLS_VERIFY, &(m_conf_tls_verify), sizeof(bool));
+                _SET_NCONN_OPT(m_nconn, ns_hurl::nconn_tls::OPT_TLS_VERIFY_ALLOW_SELF_SIGNED, &(m_conf_tls_self_ok), sizeof(bool));
+                _SET_NCONN_OPT(m_nconn, ns_hurl::nconn_tls::OPT_TLS_VERIFY_NO_HOST_CHECK, &(m_conf_tls_no_host_check), sizeof(bool));
+                _SET_NCONN_OPT(m_nconn, ns_hurl::nconn_tls::OPT_TLS_SNI, &(m_conf_tls_sni), sizeof(bool));
+                _SET_NCONN_OPT(m_nconn, ns_hurl::nconn_tls::OPT_TLS_HOSTNAME, m_host.c_str(), m_host.length());
+        }
+        else if(m_scheme == ns_hurl::SCHEME_TCP)
+        {
+                m_nconn = new ns_hurl::nconn_tcp();
+        }
+        else
+        {
+                return STATUS_ERROR;
+        }
+        m_nconn->set_ctx(this);
+        m_nconn->set_num_reqs_per_conn(1);
+        m_nconn->set_collect_stats(false);
+        m_nconn->set_connect_only(false);
+        m_nconn->set_evr_loop(m_evr_loop);
+        m_nconn->setup_evr_fd(request::evr_fd_readable_cb,
+                              request::evr_fd_writeable_cb,
+                              request::evr_fd_error_cb);
+        m_nconn->set_label(m_host);
+        // -------------------------------------------------
+        // nghttp2 setup
+        // -------------------------------------------------
+        if(m_scheme == ns_hurl::SCHEME_TLS)
+        {
+                // -------------------------------------------------
+                // create session/stream
+                // -------------------------------------------------
+                m_ngxxx_session_stream_id = -1;
+                m_ngxxx_session_stream_closed = false;
+                // -------------------------------------------------
+                // init session...
+                // -------------------------------------------------
+                nghttp2_session_callbacks *l_cb;
+                nghttp2_session_callbacks_new(&l_cb);
+                nghttp2_session_callbacks_set_send_callback(l_cb, ngxxx_send_cb);
+                nghttp2_session_callbacks_set_on_frame_recv_callback(l_cb, ngxxx_frame_recv_cb);
+                nghttp2_session_callbacks_set_on_data_chunk_recv_callback(l_cb, ngxxx_data_chunk_recv_cb);
+                nghttp2_session_callbacks_set_on_stream_close_callback(l_cb, ngxxx_stream_close_cb);
+                nghttp2_session_callbacks_set_on_header_callback(l_cb, ngxxx_header_cb);
+                nghttp2_session_callbacks_set_on_begin_headers_callback(l_cb, ngxxx_begin_headers_cb);
+                nghttp2_session_client_new(&(m_ngxxx_session), l_cb, this);
+                nghttp2_session_callbacks_del(l_cb);
+        }
+        // -------------------------------------------------
+        // done
+        // -------------------------------------------------
+        return STATUS_OK;
 }
+//: ----------------------------------------------------------------------------
+//: \details: TODO
+//: \return:  TODO
+//: \param:   TODO
+//: ----------------------------------------------------------------------------
+int32_t request::teardown(ns_hurl::http_status_t a_status)
+{
+        // -------------------------------------------------
+        // TODO PUT BACK!!!
+        // -------------------------------------------------
+#if 0
+        if(m_timer_obj)
+        {
+                m_t_phurl->m_evr_loop->cancel_timer(m_timer_obj);
+                m_timer_obj = NULL;
+        }
+        --(m_t_phurl->m_num_pending);
+        --(m_t_phurl->m_num_in_progress);
+        ++g_req_num_completed;
+        --g_req_num_in_flight;
+        --g_req_num_pending;
+        if(a_status >= 500)
+        {
+                ++g_req_num_errors;
+                ++g_sum_error;
+                // on error
+
+                if(m_nconn)
+                {
+                        ns_hurl::conn_status_t l_conn_status = ns_hurl::nconn_get_status(*m_nconn);
+                        //printf("%s.%s.%d: host:          %s\n",__FILE__,__FUNCTION__,__LINE__,a_subr.get_host().c_str());
+                        //printf("%s.%s.%d: m_error_str:   %s\n",__FILE__,__FUNCTION__,__LINE__,l_resp->m_error_str.c_str());
+                        //printf("%s.%s.%d: l_conn_status: %d\n",__FILE__,__FUNCTION__,__LINE__,l_conn_status);
+                        switch(l_conn_status)
+                        {
+                        case ns_hurl::CONN_STATUS_CANCELLED:
+                        {
+                                ++(g_sum_error_conn);
+                                break;
+                        }
+                        case ns_hurl::CONN_STATUS_ERROR_ADDR_LOOKUP_FAILURE:
+                        {
+                                ++(g_sum_error_addr);
+                                break;
+                        }
+                        case ns_hurl::CONN_STATUS_ERROR_ADDR_LOOKUP_TIMEOUT:
+                        {
+                                ++(g_sum_error_addr);
+                                break;
+                        }
+                        case ns_hurl::CONN_STATUS_ERROR_CONNECT_TLS:
+                        {
+                                ++(g_sum_error_conn);
+                                // Get last error
+                                if(m_nconn)
+                                {
+                                        SSL *l_tls = ns_hurl::nconn_get_SSL(*m_nconn);
+                                        long l_tls_vr = SSL_get_verify_result(l_tls);
+                                        if ((l_tls_vr == X509_V_ERR_DEPTH_ZERO_SELF_SIGNED_CERT) ||
+                                            (l_tls_vr == X509_V_ERR_SELF_SIGNED_CERT_IN_CHAIN))
+                                        {
+                                                ++(g_sum_error_tls_self_signed);
+                                        }
+                                        else if(l_tls_vr == X509_V_ERR_CERT_HAS_EXPIRED)
+                                        {
+                                                ++(g_sum_error_tls_expired);
+                                        }
+                                        else if((l_tls_vr == X509_V_ERR_UNABLE_TO_GET_ISSUER_CERT) ||
+                                                (l_tls_vr == X509_V_ERR_UNABLE_TO_GET_ISSUER_CERT_LOCALLY))
+                                        {
+                                                ++(g_sum_error_tls_issuer);
+                                        }
+                                        else
+                                        {
+                                                //long l_err = ns_hurl::nconn_get_last_SSL_err(a_nconn);
+                                                //printf("ERRORXXXX: %ld\n", l_err);
+                                                //printf("ERRORXXXX: %s\n", ERR_error_string(l_err,NULL));
+                                                //printf("ERRORXXXX: %s\n", l_resp->m_error_str.c_str());
+                                                ++(g_sum_error_tls_other);
+                                        }
+                                }
+                                break;
+
+                        }
+                        case ns_hurl::CONN_STATUS_ERROR_CONNECT_TLS_HOST:
+                        {
+                                ++(g_sum_error_conn);
+                                ++(g_sum_error_tls_hostname);
+                                break;
+                        }
+                        default:
+                        {
+                                //printf("CONN STATUS: %d\n", l_conn_status);
+                                ++(g_sum_error_conn);
+                                ++(g_sum_error_unknown);
+                                break;
+                        }
+                        }
+                }
+        }
+        else
+        {
+                ++g_sum_success;
+                // on success
+                if(m_nconn)
+                {
+                        SSL *l_SSL = ns_hurl::nconn_get_SSL(*m_nconn);
+                        if(l_SSL)
+                        {
+                                int32_t l_protocol_num = ns_hurl::get_tls_info_protocol_num(l_SSL);
+                                m_tls_info_cipher_str = ns_hurl::get_tls_info_cipher_str(l_SSL);
+                                m_tls_info_protocol_str = ns_hurl::get_tls_info_protocol_str(l_protocol_num);
+
+                                pthread_mutex_lock(&g_sum_info_mutex);
+                                ++(g_sum_info_tls_ciphers[m_tls_info_cipher_str]);
+                                ++(g_sum_info_tls_protocols[m_tls_info_protocol_str]);
+                                pthread_mutex_unlock(&g_sum_info_mutex);
+
+#if 0
+                                SSL_SESSION *m_tls_session = SSL_get_session(m_tls);
+                                SSL_SESSION_print_fp(stdout, m_tls_session);
+                                X509* l_cert = NULL;
+                                l_cert = SSL_get_peer_certificate(m_tls);
+                                if(NULL == l_cert)
+                                {
+                                        NDBG_PRINT("SSL_get_peer_certificate error.  tls: %p\n", m_tls);
+                                        return NC_STATUS_ERROR;
+                                }
+                                X509_print_fp(stdout, l_cert);
+#endif
+                        }
+                }
+        }
+        if(m_nconn)
+        {
+                m_nconn->nc_cleanup();
+                delete m_nconn;
+                m_nconn = NULL;
+        }
+#endif
+        return STATUS_OK;
+}
+//: ----------------------------------------------------------------------------
+//: \details: TODO
+//: \return:  TODO
+//: \param:   TODO
+//: ----------------------------------------------------------------------------
+int32_t request::run_state_machine(void *a_data, ns_hurl::evr_mode_t a_conn_mode)
+{
+        NDBG_PRINT("RUN a_conn_mode: %d a_data: %p\n", a_conn_mode, a_data);
+        //CHECK_FOR_NULL_ERROR(a_data);
+        // TODO -return OK for a_data == NULL
+        if(!a_data)
+        {
+                return STATUS_OK;
+        }
+        ns_hurl::nconn* l_nconn = static_cast<ns_hurl::nconn*>(a_data);
+        request *l_rx = static_cast<request *>(l_nconn->get_data());
+        // -------------------------------------------------
+        // ERROR
+        // -------------------------------------------------
+        if(a_conn_mode == ns_hurl::EVR_MODE_ERROR)
+        {
+                // ignore errors for free connections
+                if(l_nconn->is_free())
+                {
+                        //TRC_ERROR("call back for free connection\n");
+                        return STATUS_OK;
+                }
+                if(l_rx)
+                {
+#if 0
+                        l_rx->m_evr_loop->cancel_timer(l_rx->m_timer_obj);
+                        // TODO Check status
+                        l_rx->m_timer_obj = NULL;
+                        // TODO FIX!!!
+#endif
+                        return l_rx->teardown(ns_hurl::HTTP_STATUS_BAD_GATEWAY);
+                        return STATUS_OK;
+                }
+                else
+                {
+                        return STATUS_ERROR;
+                }
+        }
+        // -------------------------------------------------
+        // TIMEOUT
+        // -------------------------------------------------
+        else if(a_conn_mode == ns_hurl::EVR_MODE_TIMEOUT)
+        {
+                //NDBG_PRINT("%sTIMEOUT%s --HOST: %s\n", ANSI_COLOR_FG_RED, ANSI_COLOR_OFF, l_rx->m_host.c_str());
+                // ignore timeout for free connections
+                if(l_nconn->is_free())
+                {
+                        //TRC_ERROR("call back for free connection\n");
+                        return STATUS_OK;
+                }
+                if(l_rx)
+                {
+                        return l_rx->teardown(ns_hurl::HTTP_STATUS_GATEWAY_TIMEOUT);
+                        return STATUS_OK;
+                }
+                return STATUS_ERROR;
+        }
+        else if(a_conn_mode == ns_hurl::EVR_MODE_READ)
+        {
+                // ignore readable for free connections
+                if(l_nconn->is_free())
+                {
+                        //TRC_ERROR("call back for free connection\n");
+                        return STATUS_OK;
+                }
+        }
+        // -------------------------------------------------
+        // TODO unknown conn mode???
+        // -------------------------------------------------
+        else if((a_conn_mode != ns_hurl::EVR_MODE_READ) &&
+                (a_conn_mode != ns_hurl::EVR_MODE_WRITE))
+        {
+                //TRC_ERROR("unknown a_conn_mode: %d\n", a_conn_mode);
+                return STATUS_OK;
+        }
+        // -------------------------------------------------
+        // in/out q's
+        // -------------------------------------------------
+        ns_hurl::nbq *l_in_q = NULL;
+        ns_hurl::nbq *l_out_q = NULL;
+#if 0
+        if(l_rx)
+        {
+                l_in_q = l_rx->m_in_q;
+                l_out_q = l_rx->m_out_q;
+        }
+        else
+        {
+                l_in_q = l_t_phurl->m_orphan_in_q;
+                l_out_q = l_t_phurl->m_orphan_out_q;
+        }
+#endif
+        // -------------------------------------------------
+        // conn loop
+        // -------------------------------------------------
+        int32_t l_s = HURL_STATUS_OK;
+        do {
+                uint32_t l_read = 0;
+                uint32_t l_written = 0;
+                l_s = l_nconn->nc_run_state_machine(a_conn_mode, l_in_q, l_read, l_out_q, l_written);
+                NDBG_PRINT("l_nconn->nc_run_state_machine(%d): status: %d\n", a_conn_mode, l_s);
+                if(!l_rx ||
+                   (l_s == ns_hurl::nconn::NC_STATUS_EOF) ||
+                   (l_s == ns_hurl::nconn::NC_STATUS_ERROR) ||
+                   l_nconn->is_done())
+                {
+                        goto check_conn_status;
+                }
+                // -----------------------------------------
+                // READABLE
+                // -----------------------------------------
+                if(a_conn_mode == ns_hurl::EVR_MODE_READ)
+                {
+#if 0
+                        // -----------------------------------------
+                        // Handle completion
+                        // -----------------------------------------
+                        if(l_rx->m_resp &&
+                           l_rx->m_resp->m_complete)
+                        {
+                                // Cancel timer
+                                l_t_phurl->m_evr_loop->cancel_timer(l_rx->m_timer_obj);
+                                // TODO Check status
+                                l_rx->m_timer_obj = NULL;
+                                if(g_conf_verbose && l_rx->m_resp)
+                                {
+                                        if(g_conf_color) TRC_OUTPUT("%s", ANSI_COLOR_FG_CYAN);
+                                        l_rx->m_resp->show();
+                                        if(g_conf_color) TRC_OUTPUT("%s", ANSI_COLOR_OFF);
+                                }
+                                // Get request time
+                                if(l_nconn->get_collect_stats_flag())
+                                {
+                                        //l_nconn->set_stat_tt_completion_us(get_delta_time_us(l_nconn->get_connect_start_time_us()));
+                                }
+                                if(l_rx->m_resp && l_t_phurl)
+                                {
+                                        //l_t_phurl->add_stat_to_agg(l_nconn->get_stats(), l_rx->m_resp->get_status());
+                                }
+                                l_s = ns_hurl::nconn::NC_STATUS_EOF;
+                                goto check_conn_status;
+                        }
+#endif
+                }
+                // -----------------------------------------
+                // STATUS_OK
+                // -----------------------------------------
+                else if(l_s == ns_hurl::nconn::NC_STATUS_OK)
+                {
+                        l_s = ns_hurl::nconn::NC_STATUS_BREAK;
+                        goto check_conn_status;
+                }
+check_conn_status:
+                if(l_nconn->is_free())
+                {
+                        return STATUS_OK;
+                }
+                if(!l_rx)
+                {
+                        //TRC_ERROR("no ups_srvr_session associated with nconn mode: %d\n", a_conn_mode);
+                        return STATUS_ERROR;
+                }
+                switch(l_s)
+                {
+                case ns_hurl::nconn::NC_STATUS_BREAK:
+                {
+                        goto done;
+                }
+                case ns_hurl::nconn::NC_STATUS_EOF:
+                {
+#if 0
+                        // Connect only && done --early exit...
+                        if(g_conf_connect_only)
+                        {
+                                if(l_rx->m_resp)
+                                {
+                                        l_rx->m_resp->set_status(ns_hurl::HTTP_STATUS_OK);
+                                }
+                                if(l_t_phurl)
+                                {
+                                        //l_t_phurl->add_stat_to_agg(l_nconn->get_stats(), ns_hurl::HTTP_STATUS_OK);
+                                }
+                        }
+#endif
+                        return l_rx->teardown(ns_hurl::HTTP_STATUS_OK);
+                }
+                case ns_hurl::nconn::NC_STATUS_ERROR:
+                {
+                        return l_rx->teardown(ns_hurl::HTTP_STATUS_BAD_GATEWAY);
+                }
+                default:
+                {
+                        break;
+                }
+                }
+                if(l_nconn->is_done())
+                {
+                        return l_rx->teardown(ns_hurl::HTTP_STATUS_OK);
+                }
+        } while((l_s != ns_hurl::nconn::NC_STATUS_AGAIN));
+done:
+        return STATUS_OK;
+}
+//: ****************************************************************************
+//: ************************ N P N  S U P P O R T ******************************
+//: ****************************************************************************
+//: ----------------------------------------------------------------------------
+//: \details: NPN TLS extension client callback. We check that server advertised
+//:           the HTTP/2 protocol the nghttp2 library supports. If not, exit
+//:           the program.
+//: \return:  TODO
+//: \param:   TODO
+//: ----------------------------------------------------------------------------
+static int npn_select_next_proto_cb(SSL *a_ssl _U_,
+                                    unsigned char **a_out,
+                                    unsigned char *a_outlen,
+                                    const unsigned char *a_in,
+                                    unsigned int a_inlen,
+                                    void *a_arg)
+{
+        NDBG_PRINT("next_proto_cb\n");
+        ns_hurl::mem_display((const uint8_t *)a_in, a_inlen);
+        if(nghttp2_select_next_protocol(a_out, a_outlen, a_in, a_inlen) <= 0)
+        {
+                errx(1, "Server did not advertise " NGHTTP2_PROTO_VERSION_ID);
+        }
+        else
+        {
+                if(a_arg)
+                {
+                        NDBG_PRINT("setting HTTP_PROTOCOL_V2_TLS\n");
+                        ((request *)a_arg)->m_conf_hp_type = request::HTTP_PROTOCOL_V2_TLS;
+                }
+        }
+        return SSL_TLSEXT_ERR_OK;
+}
+//: ----------------------------------------------------------------------------
+//: \details: TODO
+//: \return:  TODO
+//: \param:   TODO
+//: ----------------------------------------------------------------------------
+static int npn_select_next_proto_advertised_cb(SSL *a_ssl,
+                                               const unsigned char **a_out,
+                                               unsigned int *a_outlen,
+                                               void *a_arg)
+{
+        NDBG_PRINT("next_proto_cb\n");
+        return SSL_TLSEXT_ERR_OK;
+}
+#if 0
 //: ----------------------------------------------------------------------------
 //: \details: TODO
 //: \return:  TODO
@@ -509,247 +1193,7 @@ int tcp_connect(const std::string &a_host, uint16_t a_port)
         }
         return l_fd;
 }
-//: ----------------------------------------------------------------------------
-//: \details: TODO
-//: \return:  TODO
-//: \param:   TODO
-//: ----------------------------------------------------------------------------
-SSL *tls_connect(SSL_CTX *a_tls_ctx, const std::string &a_host, uint16_t a_port)
-{
-        int32_t l_fd;
-        NDBG_PRINT("performing tcp_connect\n");
-        l_fd = tcp_connect(a_host, a_port);
-        if(l_fd == -1)
-        {
-                return NULL;
-        }
-        //printf("Connected\n");
-        // Create TLS Context
-        SSL *l_tls = NULL;
-        l_tls = ::SSL_new(a_tls_ctx);
-        // TODO Check for NULL
-        ::SSL_set_fd(l_tls, l_fd);
-        // TODO Check for Errors
-        // ssl_connect
-        int l_s;
-        ERR_clear_error();
-        NDBG_PRINT("performing SSL_connect\n");
-        l_s = SSL_connect(l_tls);
-        if (l_s <= 0)
-        {
-                NDBG_PRINT("Error performing SSL_connect.\n");
-                // TODO Reason...
-                if(l_tls) {SSL_free(l_tls); l_tls = NULL;}
-                return NULL;
-        }
-        return l_tls;
-}
-//: ----------------------------------------------------------------------------
-//: nghttp2 support routines
-//: ----------------------------------------------------------------------------
-//: ----------------------------------------------------------------------------
-//: \details: NPN TLS extension client callback. We check that server advertised
-//:           the HTTP/2 protocol the nghttp2 library supports. If not, exit
-//:           the program.
-//: \return:  TODO
-//: \param:   TODO
-//: ----------------------------------------------------------------------------
-static int npn_select_next_proto_cb(SSL *a_ssl _U_,
-                                    unsigned char **a_out,
-                                    unsigned char *a_outlen,
-                                    const unsigned char *a_in,
-                                    unsigned int a_inlen,
-                                    void *a_arg _U_)
-{
-        NDBG_PRINT("next_proto_cb\n");
-        if (nghttp2_select_next_protocol(a_out, a_outlen, a_in, a_inlen) <= 0)
-        {
-                errx(1, "Server did not advertise " NGHTTP2_PROTO_VERSION_ID);
-        }
-        return SSL_TLSEXT_ERR_OK;
-}
-//: ----------------------------------------------------------------------------
-//: Types
-//: ----------------------------------------------------------------------------
-// ---------------------------------------------------------
-// TODO
-// ---------------------------------------------------------
-typedef struct
-{
-        int32_t m_id;
-        bool m_closed;
-} ngxxx_stream;
-// ---------------------------------------------------------
-// TODO
-// ---------------------------------------------------------
-typedef struct
-{
-        SSL *m_tls;
-        nghttp2_session *m_session;
-        ngxxx_stream *m_stream;
-} ngxxx_session;
-//: ----------------------------------------------------------------------------
-//: \details: nghttp2_send_callback. Here we transmit the |data|, |length| bytes,
-//:           to the network. Because we are using libevent bufferevent, we just
-//:           write those bytes into bufferevent buffer
-//: \return:  TODO
-//: \param:   TODO
-//: ----------------------------------------------------------------------------
-static ssize_t ngxxx_send_cb(nghttp2_session *a_session _U_,
-                             const uint8_t *a_data,
-                             size_t a_length,
-                             int a_flags _U_,
-                             void *a_user_data)
-{
-        ngxxx_session *l_session = (ngxxx_session *)a_user_data;
-        UNUSED(l_session);
-        NDBG_PRINT("SEND_CB\n");
-        ns_hurl::mem_display(a_data, a_length);
-        int l_s;
-        l_s = SSL_write(l_session->m_tls, a_data, a_length);
-        NDBG_PRINT("%sWRITE%s: l_s: %d\n", ANSI_COLOR_FG_BLUE, ANSI_COLOR_OFF, l_s);
-        if((l_s < 0) ||
-           ((size_t)l_s < a_length))
-        {
-                NDBG_PRINT("Error performing SSL_write: l_s: %d\n", l_s);
-                return -1;
-        }
-        return (ssize_t)l_s;
-}
-//: ----------------------------------------------------------------------------
-//: \details: nghttp2_on_frame_recv_callback: Called when nghttp2 library
-//:           received a complete frame from the remote peer.
-//: \return:  TODO
-//: \param:   TODO
-//: ----------------------------------------------------------------------------
-static int ngxxx_frame_recv_cb(nghttp2_session *a_session,
-                               const nghttp2_frame *a_frame,
-                               void *a_user_data)
-{
-        //NDBG_PRINT("%sFRAME%s: TYPE[%6u]\n", ANSI_COLOR_BG_MAGENTA, ANSI_COLOR_OFF, a_frame->hd.type);
-        ngxxx_session *l_session = (ngxxx_session *)a_user_data;
-        switch (a_frame->hd.type)
-        {
-        case NGHTTP2_HEADERS:
-        {
-                if ((a_frame->headers.cat == NGHTTP2_HCAT_RESPONSE) &&
-                    (l_session->m_stream->m_id == a_frame->hd.stream_id))
-                {
-                        //fprintf(stderr, "All headers received\n");
-                }
-                break;
-        }
-        }
-        return 0;
-}
-//: ----------------------------------------------------------------------------
-//: \details: nghttp2_on_data_chunk_recv_callback: Called when DATA frame is
-//:           received from the remote peer. In this implementation, if the frame
-//:           is meant to the stream we initiated, print the received data in
-//:           stdout, so that the user can redirect its output to the file
-//:           easily.
-//: \return:  TODO
-//: \param:   TODO
-//: ----------------------------------------------------------------------------
-static int ngxxx_data_chunk_recv_cb(nghttp2_session *a_session _U_,
-                                    uint8_t a_flags _U_,
-                                    int32_t a_stream_id,
-                                    const uint8_t *a_data,
-                                    size_t a_len,
-                                    void *a_user_data)
-{
-        //NDBG_PRINT("%sCHUNK%s: \n", ANSI_COLOR_BG_BLUE, ANSI_COLOR_OFF);
-        ngxxx_session *l_session = (ngxxx_session *) a_user_data;
-        if (l_session->m_stream->m_id == a_stream_id)
-        {
-                fwrite(a_data, a_len, 1, stdout);
-        }
-        return 0;
-}
-//: ----------------------------------------------------------------------------
-//: \details: nghttp2_on_stream_close_callback: Called when a stream is about to
-//:           closed. This example program only deals with 1 HTTP request (1
-//:           stream), if it is closed, we send GOAWAY and tear down the
-//:           session
-//: \return:  TODO
-//: \param:   TODO
-//: ----------------------------------------------------------------------------
-static int ngxxx_stream_close_cb(nghttp2_session *a_session,
-                                 int32_t a_stream_id,
-                                 uint32_t a_error_code,
-                                 void *a_user_data)
-{
-        //NDBG_PRINT("%sCLOSE%s: \n", ANSI_COLOR_BG_RED, ANSI_COLOR_OFF);
-        ngxxx_session *l_session = (ngxxx_session *) a_user_data;
-        int l_rv;
-        l_session->m_stream->m_closed = true;
-        if (l_session->m_stream->m_id == a_stream_id)
-        {
-                //fprintf(stderr, "Stream %d closed with error_code=%d\n", a_stream_id, a_error_code);
-                l_rv = nghttp2_session_terminate_session(a_session, NGHTTP2_NO_ERROR);
-                if (l_rv != 0)
-                {
-                        return NGHTTP2_ERR_CALLBACK_FAILURE;
-                }
-        }
-        return 0;
-}
-//: ----------------------------------------------------------------------------
-//: \details: nghttp2_on_header_callback: Called when nghttp2 library emits
-//:           single header name/value pair
-//: \return:  TODO
-//: \param:   TODO
-//: ----------------------------------------------------------------------------
-static int ngxxx_header_cb(nghttp2_session *a_session _U_,
-                           const nghttp2_frame *a_frame,
-                           const uint8_t *a_name,
-                           size_t a_namelen,
-                           const uint8_t *a_value,
-                           size_t a_valuelen,
-                           uint8_t a_flags _U_,
-                           void *a_user_data)
-{
-        //NDBG_PRINT("%sHEADER%s: \n", ANSI_COLOR_BG_YELLOW, ANSI_COLOR_OFF);
-        ngxxx_session *l_session = (ngxxx_session *)a_user_data;
-        switch (a_frame->hd.type)
-        {
-        case NGHTTP2_HEADERS:
-                if ((a_frame->headers.cat == NGHTTP2_HCAT_RESPONSE) &&
-                    (l_session->m_stream->m_id == a_frame->hd.stream_id))
-                {
-                        // Print response headers for the initiated request.
-                        fprintf(stdout, "%s%.*s%s: %s%.*s%s\n",
-                                ANSI_COLOR_FG_BLUE, (int)a_namelen, a_name, ANSI_COLOR_OFF,
-                                ANSI_COLOR_FG_GREEN, (int)a_valuelen, a_value, ANSI_COLOR_OFF);
-                        break;
-                }
-        }
-        return 0;
-}
-//: ----------------------------------------------------------------------------
-//: \details: nghttp2_on_begin_headers_callback:
-//:           Called when nghttp2 library gets started to receive header block.
-//: \return:  TODO
-//: \param:   TODO
-//: ----------------------------------------------------------------------------
-static int ngxxx_begin_headers_cb(nghttp2_session *a_session _U_,
-                                  const nghttp2_frame *a_frame,
-                                  void *a_user_data)
-{
-        //NDBG_PRINT("%sBEGIN_HEADERS%s: \n", ANSI_COLOR_BG_WHITE, ANSI_COLOR_OFF);
-        ngxxx_session *l_session = (ngxxx_session *)a_user_data;
-        switch (a_frame->hd.type)
-        {
-        case NGHTTP2_HEADERS:
-                if ((a_frame->headers.cat == NGHTTP2_HCAT_RESPONSE) &&
-                     (l_session->m_stream->m_id == a_frame->hd.stream_id))
-                {
-                        //fprintf(stderr, "Response headers for stream ID=%d:\n", a_frame->hd.stream_id);
-                }
-                break;
-        }
-        return 0;
-}
+#endif
 //: ----------------------------------------------------------------------------
 //: \details: Print the version.
 //: \return:  TODO
@@ -812,21 +1256,9 @@ int main(int argc, char** argv)
         bool l_conf_verbose = false;
         bool l_conf_color = true;
         std::string l_output_file = "";
-        std::string l_conf_tls_cipher_list;
-        long l_conf_tls_options;
-        bool l_conf_tls_verify;
-        bool l_conf_tls_sni;
-        bool l_conf_tls_self_ok;
-        bool l_conf_tls_no_host_check;
-        std::string l_conf_tls_ca_file;
-        std::string l_conf_tls_ca_path;
-        // TODO REMOVE
+        // TODO REMOVE!!!
         UNUSED(l_conf_verbose);
         UNUSED(l_conf_color);
-        UNUSED(l_conf_tls_verify);
-        UNUSED(l_conf_tls_sni);
-        UNUSED(l_conf_tls_self_ok);
-        UNUSED(l_conf_tls_no_host_check);
         // -------------------------------------------------
         // tty???
         // -------------------------------------------------
@@ -838,11 +1270,12 @@ int main(int argc, char** argv)
         // defaults
         // -------------------------------------------------
         // defaults from nghttp2 client example
-        l_conf_tls_options = SSL_OP_ALL |
-                             SSL_OP_NO_SSLv2 |
-                             SSL_OP_NO_SSLv3 |
-                             SSL_OP_NO_COMPRESSION |
-                             SSL_OP_NO_SESSION_RESUMPTION_ON_RENEGOTIATION;
+        l_request->m_conf_tls_options =
+                SSL_OP_ALL |
+                SSL_OP_NO_SSLv2 |
+                SSL_OP_NO_SSLv3 |
+                SSL_OP_NO_COMPRESSION |
+                SSL_OP_NO_SESSION_RESUMPTION_ON_RENEGOTIATION;
         // -------------------------------------------------
         // Get args...
         // -------------------------------------------------
@@ -989,7 +1422,7 @@ int main(int argc, char** argv)
                         if(l_arg.length() > 64)
                         {
                                 printf("Error verb string: %s too large try < 64 chars\n", l_arg.c_str());
-                                return HURL_STATUS_ERROR;
+                                return STATUS_ERROR;
                         }
                         l_request->m_verb = l_arg;
                         break;
@@ -999,7 +1432,7 @@ int main(int argc, char** argv)
                 // -----------------------------------------
                 case 'y':
                 {
-                        l_conf_tls_cipher_list = l_arg;
+                        l_request->m_conf_tls_cipher_list = l_arg;
                         break;
                 }
                 // -----------------------------------------
@@ -1014,7 +1447,7 @@ int main(int argc, char** argv)
                         {
                                 return STATUS_ERROR;
                         }
-                        l_conf_tls_options = l_tls_options;
+                        l_request->m_conf_tls_options = l_tls_options;
                         break;
                 }
                 // -----------------------------------------
@@ -1022,7 +1455,7 @@ int main(int argc, char** argv)
                 // -----------------------------------------
                 case 'K':
                 {
-                        l_conf_tls_verify = true;
+                        l_request->m_conf_tls_verify = true;
                         break;
                 }
                 // -----------------------------------------
@@ -1030,7 +1463,7 @@ int main(int argc, char** argv)
                 // -----------------------------------------
                 case 'N':
                 {
-                        l_conf_tls_sni = true;
+                        l_request->m_conf_tls_sni = true;
                         break;
                 }
                 // -----------------------------------------
@@ -1038,7 +1471,7 @@ int main(int argc, char** argv)
                 // -----------------------------------------
                 case 'B':
                 {
-                        l_conf_tls_self_ok = true;
+                        l_request->m_conf_tls_self_ok = true;
                         break;
                 }
                 // -----------------------------------------
@@ -1046,7 +1479,7 @@ int main(int argc, char** argv)
                 // -----------------------------------------
                 case 'M':
                 {
-                        l_conf_tls_no_host_check = true;
+                        l_request->m_conf_tls_no_host_check = true;
                         break;
                 }
                 // -----------------------------------------
@@ -1054,7 +1487,7 @@ int main(int argc, char** argv)
                 // -----------------------------------------
                 case 'F':
                 {
-                        l_conf_tls_ca_file = l_arg;
+                        l_request->m_conf_tls_ca_file = l_arg;
                         break;
                 }
                 // -----------------------------------------
@@ -1062,7 +1495,7 @@ int main(int argc, char** argv)
                 // -----------------------------------------
                 case 'L':
                 {
-                        l_conf_tls_ca_path = l_arg;
+                        l_request->m_conf_tls_ca_path = l_arg;
                         break;
                 }
                 // -----------------------------------------
@@ -1128,85 +1561,68 @@ int main(int argc, char** argv)
                 print_usage(stdout, STATUS_ERROR);
         }
         // -------------------------------------------------
-        // init tls...
+        // resolve
         // -------------------------------------------------
-        ns_hurl::tls_init();
-        SSL_CTX *l_ctx = NULL;
-        std::string l_unused;
-        l_ctx = ns_hurl::tls_init_ctx(l_conf_tls_cipher_list, // ctx cipher list str
-                                      l_conf_tls_options,     // ctx options
-                                      l_conf_tls_ca_file,     // ctx ca file
-                                      l_conf_tls_ca_path,     // ctx ca path
-                                      false,                  // is server?
-                                      l_unused,               // tls key
-                                      l_unused);              // tls crt
-        // modes from nghttp2 client example
-        SSL_CTX_set_mode(l_ctx, SSL_MODE_AUTO_RETRY);
-        SSL_CTX_set_mode(l_ctx, SSL_MODE_RELEASE_BUFFERS);
-        // set npn callback
-#ifdef HAS_NPN
-        SSL_CTX_set_next_proto_select_cb(l_ctx, npn_select_next_proto_cb, NULL);
-#endif
-
-#ifdef HAS_ALPN
+        ns_hurl::host_info l_host_info;
+        l_s = ns_hurl::nlookup(l_request->m_host, l_request->m_port, l_host_info);
+        if(l_s != HURL_STATUS_OK)
+        {
+                printf("Error: resolving: %s:%d\n", l_request->m_host.c_str(), l_request->m_port);
+                return HURL_STATUS_ERROR;
+        }
+        l_request->m_nconn->set_host_info(l_host_info);
+        // -------------------------------------------------
+        // create request
+        // -------------------------------------------------
+        // TODO
+        request::evr_fd_writeable_cb(l_request->m_nconn);
+        // -------------------------------------------------
+        // run
+        // -------------------------------------------------
+        //NDBG_PRINT("Running.\n");
+        while(1)
+        {
+                l_s = l_request->m_evr_loop->run();
+                if(l_s != HURL_STATUS_OK)
+                {
+                        // TODO log run failure???
+                        NDBG_PRINT("error performing l_request->m_evr_loop->run\n");
+                }
+        }
+        // -------------------------------------------------
+        // TODO PUT BACK!
+        // -------------------------------------------------
 #if 0
-        SSL_CTX_set_alpn_protos(l_ctx, (const unsigned char *)"\x02h2", 3);
-#else
-        #define ALPN_HTTP_1_1_LENGTH 8
-        #define ALPN_HTTP_1_1 "http/1.1"
-        int l_cur = 0;
-        unsigned char l_protocols[128];
-
-        l_protocols[l_cur++] = NGHTTP2_PROTO_VERSION_ID_LEN;
-        memcpy(&l_protocols[l_cur], NGHTTP2_PROTO_VERSION_ID, NGHTTP2_PROTO_VERSION_ID_LEN);
-        l_cur += NGHTTP2_PROTO_VERSION_ID_LEN;
-        NDBG_PRINT("ALPN, offering %s\n", NGHTTP2_PROTO_VERSION_ID);
-
-        l_protocols[l_cur++] = ALPN_HTTP_1_1_LENGTH;
-        memcpy(&l_protocols[l_cur], ALPN_HTTP_1_1, ALPN_HTTP_1_1_LENGTH);
-        l_cur += ALPN_HTTP_1_1_LENGTH;
-        NDBG_PRINT("ALPN, offering %s\n", ALPN_HTTP_1_1);
-        // ---------------------------------------
-        // expects length prefixed preference
-        // ordered list of protocols in wire
-        // format
-        // ---------------------------------------
-        SSL_CTX_set_alpn_protos(l_ctx, l_protocols, l_cur);
-#endif
-#endif
-
         // -------------------------------------------------
         // connect
         // -------------------------------------------------
-        SSL *l_tls = NULL;
-        l_tls = tls_connect(l_ctx, l_request->m_host, l_request->m_port);
-        if(!l_tls)
+        int32_t l_fd;
+#if 0
+        NDBG_PRINT("performing tcp_connect\n");
+        l_fd = tcp_connect(l_request->m_host, l_request->m_port);
+        if(l_fd == -1)
         {
-                printf("Error performing ssl_connect\n");
-                return -1;
+                NDBG_PRINT("Error performing tcp_connect.\n");
+                return STATUS_ERROR;
         }
-        // -------------------------------------------------
-        // create session/stream
-        // -------------------------------------------------
-        ngxxx_session *l_session = NULL;
-        l_session = (ngxxx_session *)calloc(1, sizeof(ngxxx_session));
-        l_session->m_stream = (ngxxx_stream *)calloc(1, sizeof(ngxxx_stream));
-        l_session->m_stream->m_id = -1;
-        l_session->m_stream->m_closed = false;
-        l_session->m_tls = l_tls;
-        // -------------------------------------------------
-        // init session...
-        // -------------------------------------------------
-        nghttp2_session_callbacks *l_cb;
-        nghttp2_session_callbacks_new(&l_cb);
-        nghttp2_session_callbacks_set_send_callback(l_cb, ngxxx_send_cb);
-        nghttp2_session_callbacks_set_on_frame_recv_callback(l_cb, ngxxx_frame_recv_cb);
-        nghttp2_session_callbacks_set_on_data_chunk_recv_callback(l_cb, ngxxx_data_chunk_recv_cb);
-        nghttp2_session_callbacks_set_on_stream_close_callback(l_cb, ngxxx_stream_close_cb);
-        nghttp2_session_callbacks_set_on_header_callback(l_cb, ngxxx_header_cb);
-        nghttp2_session_callbacks_set_on_begin_headers_callback(l_cb, ngxxx_begin_headers_cb);
-        nghttp2_session_client_new(&(l_session->m_session), l_cb, l_session);
-        nghttp2_session_callbacks_del(l_cb);
+#endif
+        //printf("Connected\n");
+        // Create TLS Context
+        l_request->m_tls = ::SSL_new(l_request->m_tls_ctx);
+        // TODO Check for NULL
+        ::SSL_set_fd(l_request->m_tls, l_fd);
+        // TODO Check for Errors
+        // ssl_connect
+        ERR_clear_error();
+        NDBG_PRINT("performing SSL_connect\n");
+        l_s = SSL_connect(l_request->m_tls);
+        if(l_s <= 0)
+        {
+                NDBG_PRINT("Error performing SSL_connect.\n");
+                // TODO Reason...
+                if(l_request->m_tls) {SSL_free(l_request->m_tls); l_request->m_tls = NULL;}
+                return STATUS_ERROR;
+        }
         // -------------------------------------------------
         // send connection header
         // -------------------------------------------------
@@ -1214,7 +1630,7 @@ int main(int argc, char** argv)
                 { NGHTTP2_SETTINGS_MAX_CONCURRENT_STREAMS, 100 }
         };
         // client 24 bytes magic string will be sent by nghttp2 library
-        l_s = nghttp2_submit_settings(l_session->m_session, NGHTTP2_FLAG_NONE, l_iv, ARRLEN(l_iv));
+        l_s = nghttp2_submit_settings(l_request->m_ngxxx_session, NGHTTP2_FLAG_NONE, l_iv, ARRLEN(l_iv));
         if(l_s != 0)
         {
                 errx(1, "Could not submit SETTINGS: %s", nghttp2_strerror(l_s));
@@ -1223,7 +1639,6 @@ int main(int argc, char** argv)
         // send request
         // -------------------------------------------------
         int32_t l_id;
-        ngxxx_stream *l_stream = l_session->m_stream;
         //printf("[INFO] path      = %s\n", a_path.c_str());
         //printf("[INFO] authority = %s\n", a_host.c_str());
         // -------------------------------------------------
@@ -1252,22 +1667,22 @@ int main(int argc, char** argv)
         }
         fprintf(stdout, "\n");
         //fprintf(stderr, "Request headers:\n");
-        l_id = nghttp2_submit_request(l_session->m_session, NULL, l_hdrs, ARRLEN(l_hdrs), NULL, l_stream);
+        l_id = nghttp2_submit_request(l_request->m_ngxxx_session, NULL, l_hdrs, ARRLEN(l_hdrs), NULL, l_request);
         if (l_id < 0)
         {
                 errx(1, "Could not submit HTTP request: %s", nghttp2_strerror(l_id));
         }
         //printf("[INFO] Stream ID = %d\n", l_id);
-        l_stream->m_id = l_id;
+        l_request->m_ngxxx_session_stream_id = l_id;
         // -------------------------------------------------
         // read response
         // -------------------------------------------------
-        while(!l_session->m_stream->m_closed)
+        while(!l_request->m_ngxxx_session_stream_closed)
         {
                 // -----------------------------------------
                 // session send???
                 // -----------------------------------------
-                l_s = nghttp2_session_send(l_session->m_session);
+                l_s = nghttp2_session_send(l_request->m_ngxxx_session);
                 if (l_s != 0)
                 {
                         warnx("Fatal error: %s", nghttp2_strerror(l_s));
@@ -1280,11 +1695,11 @@ int main(int argc, char** argv)
                 // read response...
                 // -----------------------------------------
                 char l_buf[16384];
-                l_s = SSL_read(l_tls, l_buf, 16384);
-                NDBG_PRINT("%sREAD%s: l_s: %d\n", ANSI_COLOR_FG_RED, ANSI_COLOR_OFF, l_s);
-                if(l_s > 0) ns_hurl::mem_display((uint8_t *)l_buf, l_s);
+                l_s = SSL_read(l_request->m_tls, l_buf, 16384);
+                //NDBG_PRINT("%sREAD%s: l_s: %d\n", ANSI_COLOR_FG_RED, ANSI_COLOR_OFF, l_s);
+                //if(l_s > 0) ns_hurl::mem_display((uint8_t *)l_buf, l_s);
                 ssize_t l_rl;
-                l_rl = nghttp2_session_mem_recv(l_session->m_session, (const uint8_t *)l_buf, l_s);
+                l_rl = nghttp2_session_mem_recv(l_request->m_ngxxx_session, (const uint8_t *)l_buf, l_s);
                 if(l_rl < 0)
                 {
                         warnx("Fatal error: %s", nghttp2_strerror((int) l_rl));
@@ -1293,12 +1708,11 @@ int main(int argc, char** argv)
                         return -1;
                 }
         }
+#endif
         // -------------------------------------------------
         // Cleanup...
         // -------------------------------------------------
         if(l_request) {delete l_request; l_request = NULL;}
-        SSL_shutdown(l_tls);
-        SSL_CTX_free(l_ctx);
         //printf("Cleaning up...\n");
         return 0;
 }
