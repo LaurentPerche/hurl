@@ -25,7 +25,6 @@
 //: ----------------------------------------------------------------------------
 #include "http_parser/http_parser.h"
 #include "nghttp2/nghttp2.h"
-
 #include "hurl/status.h"
 #include "hurl/nconn/scheme.h"
 #include "hurl/nconn/host_info.h"
@@ -35,13 +34,16 @@
 #include "hurl/support/kv_map_list.h"
 #include "hurl/support/string_util.h"
 #include "hurl/support/tls_util.h"
+#include "hurl/support/nbq.h"
+#include "hurl/support/trace.h"
 #include "hurl/dns/nlookup.h"
 #include "hurl/http/http_status.h"
-
+#include "hurl/http/resp.h"
+#include "hurl/http/cb.h"
+#include "hurl/http/api_resp.h"
 // internal
 #include "support/ndebug.h"
 #include "support/file_util.h"
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <getopt.h>
@@ -50,20 +52,16 @@
 #define __STDC_FORMAT_MACROS
 #endif
 #include <inttypes.h>
-
 // openssl
 #include <openssl/err.h>
 #include <openssl/bio.h>
 #include <openssl/rand.h>
 #include <openssl/crypto.h>
 #include <openssl/ssl.h>
-
 // For errx
 #include <err.h>
-
 // For sleep
 #include <unistd.h>
-
 // socket support
 #include <netdb.h>
 #include <string.h>
@@ -71,7 +69,6 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <netinet/tcp.h>
-
 #include <string>
 //: ----------------------------------------------------------------------------
 //: constants
@@ -180,6 +177,10 @@ public:
                 m_tls_ctx(NULL),
                 m_tls(NULL),
                 m_nconn(NULL),
+                m_timer_obj(NULL),
+                m_resp(NULL),
+                m_in_q(NULL),
+                m_out_q(NULL),
                 m_ngxxx_session(NULL),
                 m_ngxxx_session_stream_id(-1),
                 m_ngxxx_session_stream_closed(false),
@@ -233,6 +234,10 @@ public:
         SSL_CTX *m_tls_ctx;
         SSL *m_tls;
         ns_hurl::nconn *m_nconn;
+        ns_hurl::evr_timer_t *m_timer_obj;
+        ns_hurl::resp *m_resp;
+        ns_hurl::nbq *m_in_q;
+        ns_hurl::nbq *m_out_q;
         nghttp2_session *m_ngxxx_session;
         int32_t m_ngxxx_session_stream_id;
         bool m_ngxxx_session_stream_closed;
@@ -719,7 +724,7 @@ int32_t request::init_with_url(const std::string &a_url)
         {
                 return STATUS_ERROR;
         }
-        m_nconn->set_ctx(this);
+        m_nconn->set_data(this);
         m_nconn->set_num_reqs_per_conn(1);
         m_nconn->set_collect_stats(false);
         m_nconn->set_connect_only(false);
@@ -728,6 +733,97 @@ int32_t request::init_with_url(const std::string &a_url)
                               request::evr_fd_writeable_cb,
                               request::evr_fd_error_cb);
         m_nconn->set_label(m_host);
+        // -------------------------------------------------
+        // setup resp
+        // -------------------------------------------------
+        m_resp = new ns_hurl::resp();
+        m_resp->init(true);
+        m_resp->m_http_parser->data = m_resp;
+        m_nconn->set_read_cb(ns_hurl::http_parse);
+        m_nconn->set_read_cb_data(m_resp);
+        // -------------------------------------------------
+        // setup q's
+        // -------------------------------------------------
+        m_in_q = new ns_hurl::nbq(8*1024);
+        m_resp->set_q(m_in_q);
+        m_out_q = new ns_hurl::nbq(8*1024);
+        // *************************************************
+        // -------------------------------------------------
+        // create request
+        // -------------------------------------------------
+        // *************************************************
+        // TODO grab from path...
+        char l_buf[2048];
+        //if(!(a_request.m_url_query.empty()))
+        //{
+        //        l_path_ref += "?";
+        //        l_path_ref += a_request.m_url_query;
+        //}
+        //NDBG_PRINT("HOST: %s PATH: %s\n", a_reqlet.m_url.m_host.c_str(), l_path_ref.c_str());
+        int l_len;
+        if(!m_url_query.empty())
+        {
+                l_len = snprintf(l_buf, sizeof(l_buf),
+                                 "%s %s?%s HTTP/1.1",
+                                 m_verb.c_str(),
+                                 m_url_path.c_str(),
+                                 m_url_query.c_str());
+        }
+        else
+        {
+                l_len = snprintf(l_buf, sizeof(l_buf),
+                                 "%s %s HTTP/1.1",
+                                 m_verb.c_str(),
+                                 m_url_path.c_str());
+
+        }
+        ns_hurl::nbq_write_request_line(*m_out_q, l_buf, l_len);
+        // -------------------------------------------
+        // Add repo headers
+        // -------------------------------------------
+        bool l_specd_host = false;
+        // Loop over reqlet map
+        for(ns_hurl::kv_map_list_t::const_iterator i_hl = m_headers.begin();
+            i_hl != m_headers.end();
+            ++i_hl)
+        {
+                if(i_hl->first.empty() || i_hl->second.empty()) { continue;}
+                for(ns_hurl::str_list_t::const_iterator i_v = i_hl->second.begin();
+                    i_v != i_hl->second.end();
+                    ++i_v)
+                {
+                        ns_hurl::nbq_write_header(*m_out_q, i_hl->first.c_str(), i_hl->first.length(), i_v->c_str(), i_v->length());
+                        if (strcasecmp(i_hl->first.c_str(), "host") == 0)
+                        {
+                                l_specd_host = true;
+                        }
+                }
+        }
+        // -------------------------------------------
+        // Default Host if unspecified
+        // -------------------------------------------
+        if(!l_specd_host)
+        {
+                ns_hurl::nbq_write_header(*m_out_q,
+                                          "Host", strlen("Host"),
+                                          m_host.c_str(), m_host.length());
+        }
+        // -------------------------------------------
+        // body
+        // -------------------------------------------
+#if 0
+        if(g_conf_body_data && g_conf_body_data_len)
+        {
+                //NDBG_PRINT("Write: buf: %p len: %d\n", l_buf, l_len);
+                ns_hurl::nbq_write_body(a_nbq, g_conf_body_data, g_conf_body_data_len);
+        }
+#else
+        if(0){}
+#endif
+        else
+        {
+                ns_hurl::nbq_write_body(*m_out_q, NULL, 0);
+        }
         // -------------------------------------------------
         // nghttp2 setup
         // -------------------------------------------------
@@ -767,17 +863,12 @@ int32_t request::teardown(ns_hurl::http_status_t a_status)
         // -------------------------------------------------
         // TODO PUT BACK!!!
         // -------------------------------------------------
-#if 0
         if(m_timer_obj)
         {
-                m_t_phurl->m_evr_loop->cancel_timer(m_timer_obj);
+                m_evr_loop->cancel_timer(m_timer_obj);
                 m_timer_obj = NULL;
         }
-        --(m_t_phurl->m_num_pending);
-        --(m_t_phurl->m_num_in_progress);
-        ++g_req_num_completed;
-        --g_req_num_in_flight;
-        --g_req_num_pending;
+#if 0
         if(a_status >= 500)
         {
                 ++g_req_num_errors;
@@ -890,13 +981,13 @@ int32_t request::teardown(ns_hurl::http_status_t a_status)
                         }
                 }
         }
+#endif
         if(m_nconn)
         {
                 m_nconn->nc_cleanup();
                 delete m_nconn;
                 m_nconn = NULL;
         }
-#endif
         return STATUS_OK;
 }
 //: ----------------------------------------------------------------------------
@@ -928,12 +1019,10 @@ int32_t request::run_state_machine(void *a_data, ns_hurl::evr_mode_t a_conn_mode
                 }
                 if(l_rx)
                 {
-#if 0
                         l_rx->m_evr_loop->cancel_timer(l_rx->m_timer_obj);
                         // TODO Check status
                         l_rx->m_timer_obj = NULL;
                         // TODO FIX!!!
-#endif
                         return l_rx->teardown(ns_hurl::HTTP_STATUS_BAD_GATEWAY);
                         return STATUS_OK;
                 }
@@ -984,18 +1073,13 @@ int32_t request::run_state_machine(void *a_data, ns_hurl::evr_mode_t a_conn_mode
         // -------------------------------------------------
         ns_hurl::nbq *l_in_q = NULL;
         ns_hurl::nbq *l_out_q = NULL;
-#if 0
         if(l_rx)
         {
                 l_in_q = l_rx->m_in_q;
                 l_out_q = l_rx->m_out_q;
         }
-        else
-        {
-                l_in_q = l_t_phurl->m_orphan_in_q;
-                l_out_q = l_t_phurl->m_orphan_out_q;
-        }
-#endif
+        NDBG_PRINT("l_in_q:  %p\n", l_in_q);
+        NDBG_PRINT("l_out_q: %p\n", l_out_q);
         // -------------------------------------------------
         // conn loop
         // -------------------------------------------------
@@ -1017,7 +1101,6 @@ int32_t request::run_state_machine(void *a_data, ns_hurl::evr_mode_t a_conn_mode
                 // -----------------------------------------
                 if(a_conn_mode == ns_hurl::EVR_MODE_READ)
                 {
-#if 0
                         // -----------------------------------------
                         // Handle completion
                         // -----------------------------------------
@@ -1025,28 +1108,23 @@ int32_t request::run_state_machine(void *a_data, ns_hurl::evr_mode_t a_conn_mode
                            l_rx->m_resp->m_complete)
                         {
                                 // Cancel timer
-                                l_t_phurl->m_evr_loop->cancel_timer(l_rx->m_timer_obj);
+                                l_rx->m_evr_loop->cancel_timer(l_rx->m_timer_obj);
                                 // TODO Check status
                                 l_rx->m_timer_obj = NULL;
-                                if(g_conf_verbose && l_rx->m_resp)
-                                {
-                                        if(g_conf_color) TRC_OUTPUT("%s", ANSI_COLOR_FG_CYAN);
-                                        l_rx->m_resp->show();
-                                        if(g_conf_color) TRC_OUTPUT("%s", ANSI_COLOR_OFF);
-                                }
+                                //if(g_conf_verbose && l_rx->m_resp)
+                                //{
+                                //        if(g_conf_color) TRC_OUTPUT("%s", ANSI_COLOR_FG_CYAN);
+                                //        l_rx->m_resp->show();
+                                //        if(g_conf_color) TRC_OUTPUT("%s", ANSI_COLOR_OFF);
+                                //}
                                 // Get request time
                                 if(l_nconn->get_collect_stats_flag())
                                 {
                                         //l_nconn->set_stat_tt_completion_us(get_delta_time_us(l_nconn->get_connect_start_time_us()));
                                 }
-                                if(l_rx->m_resp && l_t_phurl)
-                                {
-                                        //l_t_phurl->add_stat_to_agg(l_nconn->get_stats(), l_rx->m_resp->get_status());
-                                }
                                 l_s = ns_hurl::nconn::NC_STATUS_EOF;
                                 goto check_conn_status;
                         }
-#endif
                 }
                 // -----------------------------------------
                 // STATUS_OK
@@ -1074,20 +1152,6 @@ check_conn_status:
                 }
                 case ns_hurl::nconn::NC_STATUS_EOF:
                 {
-#if 0
-                        // Connect only && done --early exit...
-                        if(g_conf_connect_only)
-                        {
-                                if(l_rx->m_resp)
-                                {
-                                        l_rx->m_resp->set_status(ns_hurl::HTTP_STATUS_OK);
-                                }
-                                if(l_t_phurl)
-                                {
-                                        //l_t_phurl->add_stat_to_agg(l_nconn->get_stats(), ns_hurl::HTTP_STATUS_OK);
-                                }
-                        }
-#endif
                         return l_rx->teardown(ns_hurl::HTTP_STATUS_OK);
                 }
                 case ns_hurl::nconn::NC_STATUS_ERROR:
@@ -1128,7 +1192,7 @@ static int npn_select_next_proto_cb(SSL *a_ssl _U_,
         ns_hurl::mem_display((const uint8_t *)a_in, a_inlen);
         if(nghttp2_select_next_protocol(a_out, a_outlen, a_in, a_inlen) <= 0)
         {
-                errx(1, "Server did not advertise " NGHTTP2_PROTO_VERSION_ID);
+                TRC_DEBUG("Server did not advertise %s\n", NGHTTP2_PROTO_VERSION_ID);
         }
         else
         {
@@ -1259,6 +1323,9 @@ int main(int argc, char** argv)
         // TODO REMOVE!!!
         UNUSED(l_conf_verbose);
         UNUSED(l_conf_color);
+        // TODO REMOVE!!!
+        ns_hurl::trc_log_level_set(ns_hurl::TRC_LOG_LEVEL_ALL);
+        ns_hurl::trc_log_file_open("/dev/stdout");
         // -------------------------------------------------
         // tty???
         // -------------------------------------------------
@@ -1579,9 +1646,10 @@ int main(int argc, char** argv)
         // -------------------------------------------------
         // run
         // -------------------------------------------------
-        //NDBG_PRINT("Running.\n");
-        while(1)
+        NDBG_PRINT("Running.\n");
+        while(l_request->m_resp->m_complete == false)
         {
+                NDBG_PRINT("Running.\n");
                 l_s = l_request->m_evr_loop->run();
                 if(l_s != HURL_STATUS_OK)
                 {
@@ -1589,6 +1657,7 @@ int main(int argc, char** argv)
                         NDBG_PRINT("error performing l_request->m_evr_loop->run\n");
                 }
         }
+        NDBG_PRINT("Done.\n");
         // -------------------------------------------------
         // TODO PUT BACK!
         // -------------------------------------------------
