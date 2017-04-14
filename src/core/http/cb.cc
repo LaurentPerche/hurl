@@ -20,7 +20,6 @@
 //:   limitations under the License.
 //:
 //: ----------------------------------------------------------------------------
-
 //: ----------------------------------------------------------------------------
 //: Includes
 //: ----------------------------------------------------------------------------
@@ -31,7 +30,6 @@
 #include "hurl/support/trace.h"
 #include "hurl/status.h"
 #include <string.h>
-
 //: ----------------------------------------------------------------------------
 //: Macros
 //: ----------------------------------------------------------------------------
@@ -53,7 +51,6 @@
         } while(0);
 
 namespace ns_hurl {
-
 //: ----------------------------------------------------------------------------
 //: \details: TODO
 //: \return:  TODO
@@ -84,7 +81,6 @@ int32_t http_parse(void *a_data, char *a_buf, uint32_t a_len, uint64_t a_off)
         }
         return HURL_STATUS_OK;
 }
-
 //: ----------------------------------------------------------------------------
 //: \details: TODO
 //: \return:  TODO
@@ -96,7 +92,6 @@ int hp_on_message_begin(http_parser* a_parser)
         CHECK_FOR_NULL_OK(l_hmsg);
         return 0;
 }
-
 //: ----------------------------------------------------------------------------
 //: \details: TODO
 //: \return:  TODO
@@ -114,7 +109,6 @@ int hp_on_url(http_parser* a_parser, const char *a_at, size_t a_length)
         }
         return 0;
 }
-
 //: ----------------------------------------------------------------------------
 //: \details: TODO
 //: \return:  TODO
@@ -137,7 +131,6 @@ int hp_on_status(http_parser* a_parser, const char *a_at, size_t a_length)
         }
         return 0;
 }
-
 //: ----------------------------------------------------------------------------
 //: \details: TODO
 //: \return:  TODO

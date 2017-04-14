@@ -148,6 +148,7 @@ static int npn_select_next_proto_advertised_cb(SSL *a_ssl,
                                                const unsigned char **a_out,
                                                unsigned int *a_outlen,
                                                void *a_arg);
+
 //: ----------------------------------------------------------------------------
 //: request object/meta
 //: ----------------------------------------------------------------------------
@@ -209,6 +210,7 @@ public:
         }
         int32_t set_header(const std::string &a_key, const std::string &a_val);
         int32_t init_with_url(const std::string &a_url);
+        int32_t create_request(void);
         // -------------------------------------------------
         // Public Static (class) methods
         // -------------------------------------------------
@@ -216,6 +218,8 @@ public:
         static int32_t evr_fd_writeable_cb(void *a_data){return run_state_machine(a_data, ns_hurl::EVR_MODE_WRITE);}
         static int32_t evr_fd_error_cb(void *a_data) {return run_state_machine(a_data, ns_hurl::EVR_MODE_ERROR);}
         static int32_t evr_fd_timeout_cb(void *a_ctx, void *a_data){return run_state_machine(a_data, ns_hurl::EVR_MODE_TIMEOUT);}
+        // connected cb
+        static int32_t connected_cb(ns_hurl::nconn *a_nconn, void *a_data);
         // -------------------------------------------------
         // public members
         // -------------------------------------------------
@@ -284,17 +288,22 @@ static ssize_t ngxxx_send_cb(nghttp2_session *a_session _U_,
                              void *a_user_data)
 {
         request *l_request = (request *)a_user_data;
-        //NDBG_PRINT("SEND_CB\n");
-        //ns_hurl::mem_display(a_data, a_length);
+        NDBG_PRINT("SEND_CB\n");
+        ns_hurl::mem_display(a_data, a_length);
+#if 0
         int l_s;
         l_s = SSL_write(l_request->m_tls, a_data, a_length);
-        //NDBG_PRINT("%sWRITE%s: l_s: %d\n", ANSI_COLOR_FG_BLUE, ANSI_COLOR_OFF, l_s);
         if((l_s < 0) ||
            ((size_t)l_s < a_length))
         {
                 NDBG_PRINT("Error performing SSL_write: l_s: %d\n", l_s);
                 return -1;
         }
+#else
+        int64_t l_s;
+        l_s = l_request->m_out_q->write((const char *)a_data,(uint64_t)a_length);
+#endif
+        NDBG_PRINT("%sWRITE%s: l_s: %d\n", ANSI_COLOR_FG_BLUE, ANSI_COLOR_OFF, (int)l_s);
         return (ssize_t)l_s;
 }
 //: ----------------------------------------------------------------------------
@@ -307,7 +316,7 @@ static int ngxxx_frame_recv_cb(nghttp2_session *a_session,
                                const nghttp2_frame *a_frame,
                                void *a_user_data)
 {
-        //NDBG_PRINT("%sFRAME%s: TYPE[%6u]\n", ANSI_COLOR_BG_MAGENTA, ANSI_COLOR_OFF, a_frame->hd.type);
+        NDBG_PRINT("%sFRAME%s: TYPE[%6u]\n", ANSI_COLOR_BG_MAGENTA, ANSI_COLOR_OFF, a_frame->hd.type);
         request *l_request = (request *)a_user_data;
         switch (a_frame->hd.type)
         {
@@ -322,7 +331,6 @@ static int ngxxx_frame_recv_cb(nghttp2_session *a_session,
         }
         }
         return 0;
-
 }
 //: ----------------------------------------------------------------------------
 //: \details: nghttp2_on_data_chunk_recv_callback: Called when DATA frame is
@@ -340,7 +348,7 @@ static int ngxxx_data_chunk_recv_cb(nghttp2_session *a_session _U_,
                                     size_t a_len,
                                     void *a_user_data)
 {
-        //NDBG_PRINT("%sCHUNK%s: \n", ANSI_COLOR_BG_BLUE, ANSI_COLOR_OFF);
+        NDBG_PRINT("%sCHUNK%s: \n", ANSI_COLOR_BG_BLUE, ANSI_COLOR_OFF);
         request *l_request = (request *)a_user_data;
         if(l_request->m_ngxxx_session_stream_id == a_stream_id)
         {
@@ -361,7 +369,7 @@ static int ngxxx_stream_close_cb(nghttp2_session *a_session,
                                  uint32_t a_error_code,
                                  void *a_user_data)
 {
-        //NDBG_PRINT("%sCLOSE%s: \n", ANSI_COLOR_BG_RED, ANSI_COLOR_OFF);
+        NDBG_PRINT("%sCLOSE%s: \n", ANSI_COLOR_BG_RED, ANSI_COLOR_OFF);
         request *l_request = (request *)a_user_data;
         int l_rv;
         l_request->m_ngxxx_session_stream_closed = true;
@@ -392,7 +400,7 @@ static int ngxxx_header_cb(nghttp2_session *a_session _U_,
                            uint8_t a_flags _U_,
                            void *a_user_data)
 {
-        //NDBG_PRINT("%sHEADER%s: \n", ANSI_COLOR_BG_YELLOW, ANSI_COLOR_OFF);
+        NDBG_PRINT("%sHEADER%s: \n", ANSI_COLOR_BG_YELLOW, ANSI_COLOR_OFF);
         request *l_request = (request *)a_user_data;
         switch (a_frame->hd.type)
         {
@@ -419,7 +427,7 @@ static int ngxxx_begin_headers_cb(nghttp2_session *a_session _U_,
                                   const nghttp2_frame *a_frame,
                                   void *a_user_data)
 {
-        //NDBG_PRINT("%sBEGIN_HEADERS%s: \n", ANSI_COLOR_BG_WHITE, ANSI_COLOR_OFF);
+        NDBG_PRINT("%sBEGIN_HEADERS%s: \n", ANSI_COLOR_BG_WHITE, ANSI_COLOR_OFF);
         request *l_request = (request *)a_user_data;
         switch (a_frame->hd.type)
         {
@@ -480,6 +488,59 @@ int32_t request::set_header(const std::string &a_key, const std::string &a_val)
                 m_headers[a_key] = l_list;
         }
         return STATUS_OK;
+}
+//: ----------------------------------------------------------------------------
+//: \details: TODO
+//: \return:  TODO
+//: \param:   TODO
+//: ----------------------------------------------------------------------------
+int32_t request::connected_cb(ns_hurl::nconn *a_nconn, void *a_data)
+{
+        NDBG_PRINT("%sconnected%s...\n", ANSI_COLOR_FG_GREEN, ANSI_COLOR_OFF);
+        if(!a_data)
+        {
+                NDBG_PRINT("error\n");
+                return HURL_STATUS_ERROR;
+        }
+        request *l_request = (request *)a_data;
+        if(l_request->m_nconn &&
+           ns_hurl::nconn_get_SSL(*(l_request->m_nconn)))
+        {
+                SSL *l_tls = ns_hurl::nconn_get_SSL(*(l_request->m_nconn));
+                SSL_SESSION *m_tls_session = SSL_get_session(l_tls);
+                printf("%s", ANSI_COLOR_FG_YELLOW);
+                printf("+------------------------------------------------------------------------------+\n");
+                printf("|                      T L S   S E S S I O N   I N F O                         |\n");
+                printf("+------------------------------------------------------------------------------+\n");
+                printf("%s", ANSI_COLOR_OFF);
+                SSL_SESSION_print_fp(stdout, m_tls_session);
+                X509* l_cert = NULL;
+                l_cert = SSL_get_peer_certificate(l_tls);
+                if(l_cert == NULL)
+                {
+                        NDBG_PRINT("SSL_get_peer_certificate error.  tls: %p\n", l_tls);
+                        return HURL_STATUS_ERROR;
+                }
+                printf("%s", ANSI_COLOR_FG_MAGENTA);
+                printf("+------------------------------------------------------------------------------+\n");
+                printf("| *************** T L S   S E R V E R   C E R T I F I C A T E **************** |\n");
+                printf("+------------------------------------------------------------------------------+\n");
+                printf("%s", ANSI_COLOR_OFF);
+                X509_print_fp(stdout, l_cert);
+                //int32_t l_protocol_num = ns_hurl::get_tls_info_protocol_num(l_tls);
+                //std::string l_cipher = ns_hurl::get_tls_info_cipher_str(l_tls);
+                //std::string l_protocol = ns_hurl::get_tls_info_protocol_str(l_protocol_num);
+                //printf(" cipher:     %s\n", l_cipher.c_str());
+                //printf(" l_protocol: %s\n", l_protocol.c_str());
+        }
+        int32_t l_s;
+        l_s = l_request->create_request();
+        if(l_s != STATUS_OK)
+        {
+                NDBG_PRINT("error\n");
+                return HURL_STATUS_ERROR;
+        }
+        return HURL_STATUS_OK;
 }
 //: ----------------------------------------------------------------------------
 //: \details: TODO
@@ -733,6 +794,7 @@ int32_t request::init_with_url(const std::string &a_url)
                               request::evr_fd_writeable_cb,
                               request::evr_fd_error_cb);
         m_nconn->set_label(m_host);
+        m_nconn->set_connected_cb(connected_cb);
         // -------------------------------------------------
         // setup resp
         // -------------------------------------------------
@@ -747,83 +809,6 @@ int32_t request::init_with_url(const std::string &a_url)
         m_in_q = new ns_hurl::nbq(8*1024);
         m_resp->set_q(m_in_q);
         m_out_q = new ns_hurl::nbq(8*1024);
-        // *************************************************
-        // -------------------------------------------------
-        // create request
-        // -------------------------------------------------
-        // *************************************************
-        // TODO grab from path...
-        char l_buf[2048];
-        //if(!(a_request.m_url_query.empty()))
-        //{
-        //        l_path_ref += "?";
-        //        l_path_ref += a_request.m_url_query;
-        //}
-        //NDBG_PRINT("HOST: %s PATH: %s\n", a_reqlet.m_url.m_host.c_str(), l_path_ref.c_str());
-        int l_len;
-        if(!m_url_query.empty())
-        {
-                l_len = snprintf(l_buf, sizeof(l_buf),
-                                 "%s %s?%s HTTP/1.1",
-                                 m_verb.c_str(),
-                                 m_url_path.c_str(),
-                                 m_url_query.c_str());
-        }
-        else
-        {
-                l_len = snprintf(l_buf, sizeof(l_buf),
-                                 "%s %s HTTP/1.1",
-                                 m_verb.c_str(),
-                                 m_url_path.c_str());
-
-        }
-        ns_hurl::nbq_write_request_line(*m_out_q, l_buf, l_len);
-        // -------------------------------------------
-        // Add repo headers
-        // -------------------------------------------
-        bool l_specd_host = false;
-        // Loop over reqlet map
-        for(ns_hurl::kv_map_list_t::const_iterator i_hl = m_headers.begin();
-            i_hl != m_headers.end();
-            ++i_hl)
-        {
-                if(i_hl->first.empty() || i_hl->second.empty()) { continue;}
-                for(ns_hurl::str_list_t::const_iterator i_v = i_hl->second.begin();
-                    i_v != i_hl->second.end();
-                    ++i_v)
-                {
-                        ns_hurl::nbq_write_header(*m_out_q, i_hl->first.c_str(), i_hl->first.length(), i_v->c_str(), i_v->length());
-                        if (strcasecmp(i_hl->first.c_str(), "host") == 0)
-                        {
-                                l_specd_host = true;
-                        }
-                }
-        }
-        // -------------------------------------------
-        // Default Host if unspecified
-        // -------------------------------------------
-        if(!l_specd_host)
-        {
-                ns_hurl::nbq_write_header(*m_out_q,
-                                          "Host", strlen("Host"),
-                                          m_host.c_str(), m_host.length());
-        }
-        // -------------------------------------------
-        // body
-        // -------------------------------------------
-#if 0
-        if(g_conf_body_data && g_conf_body_data_len)
-        {
-                //NDBG_PRINT("Write: buf: %p len: %d\n", l_buf, l_len);
-                ns_hurl::nbq_write_body(a_nbq, g_conf_body_data, g_conf_body_data_len);
-        }
-#else
-        if(0){}
-#endif
-        else
-        {
-                ns_hurl::nbq_write_body(*m_out_q, NULL, 0);
-        }
         // -------------------------------------------------
         // nghttp2 setup
         // -------------------------------------------------
@@ -851,6 +836,159 @@ int32_t request::init_with_url(const std::string &a_url)
         // -------------------------------------------------
         // done
         // -------------------------------------------------
+        return STATUS_OK;
+}
+//: ----------------------------------------------------------------------------
+//: \details: TODO
+//: \return:  TODO
+//: \param:   TODO
+//: ----------------------------------------------------------------------------
+int32_t request::create_request(void)
+{
+        if(m_conf_hp_type == HTTP_PROTOCOL_V2_TLS)
+        {
+                // -------------------------------------------------
+                // send connection header
+                // -------------------------------------------------
+                nghttp2_settings_entry l_iv[1] = {
+                        { NGHTTP2_SETTINGS_MAX_CONCURRENT_STREAMS, 100 }
+                };
+                int32_t l_s;
+                // client 24 bytes magic string will be sent by nghttp2 library
+                l_s = nghttp2_submit_settings(m_ngxxx_session, NGHTTP2_FLAG_NONE, l_iv, ARRLEN(l_iv));
+                if(l_s != 0)
+                {
+                        errx(1, "Could not submit SETTINGS: %s", nghttp2_strerror(l_s));
+                }
+                // -------------------------------------------------
+                // send request
+                // -------------------------------------------------
+                int32_t l_id;
+                //printf("[INFO] path      = %s\n", a_path.c_str());
+                //printf("[INFO] authority = %s\n", a_host.c_str());
+                // -------------------------------------------------
+                // authority note:
+                // -------------------------------------------------
+                // is the concatenation of host and port with ":" in
+                // between.
+                // -------------------------------------------------
+#define MAKE_NV(NAME, VALUE, VALUELEN) {(uint8_t *) NAME, (uint8_t *)VALUE, sizeof(NAME) - 1, VALUELEN, NGHTTP2_NV_FLAG_NONE}
+#define MAKE_NV2(NAME, VALUE)          {(uint8_t *) NAME, (uint8_t *)VALUE, sizeof(NAME) - 1, sizeof(VALUE) - 1, NGHTTP2_NV_FLAG_NONE}
+
+                nghttp2_nv l_hdrs[] = {
+                        MAKE_NV(  ":method", m_verb.c_str(), m_verb.length()),
+                        MAKE_NV(  ":path",   m_url_path.c_str(), m_url_path.length()),
+                        MAKE_NV2( ":scheme", "https"),
+                        MAKE_NV(  ":authority", m_host.c_str(), m_host.length()),
+                        MAKE_NV2( "accept", "*/*"),
+                        MAKE_NV2( "user-agent", "nghttp2/" NGHTTP2_VERSION)
+                };
+                // print headers
+                for(size_t i_h = 0; i_h < ARRLEN(l_hdrs); ++i_h)
+                {
+                        fprintf(stdout, "%s%.*s%s: %s%.*s%s\n",
+                                ANSI_COLOR_FG_BLUE, (int)l_hdrs[i_h].namelen, l_hdrs[i_h].name, ANSI_COLOR_OFF,
+                                ANSI_COLOR_FG_GREEN, (int)l_hdrs[i_h].valuelen, l_hdrs[i_h].value, ANSI_COLOR_OFF);
+                }
+                fprintf(stdout, "\n");
+                //fprintf(stderr, "Request headers:\n");
+                l_id = nghttp2_submit_request(m_ngxxx_session, NULL, l_hdrs, ARRLEN(l_hdrs), NULL, this);
+                if (l_id < 0)
+                {
+                        errx(1, "Could not submit HTTP request: %s", nghttp2_strerror(l_id));
+                }
+                //printf("[INFO] Stream ID = %d\n", l_id);
+                m_ngxxx_session_stream_id = l_id;
+                // -----------------------------------------
+                // session send???
+                // -----------------------------------------
+                l_s = nghttp2_session_send(m_ngxxx_session);
+                if (l_s != 0)
+                {
+                        warnx("Fatal error: %s", nghttp2_strerror(l_s));
+                        // TODO
+                        //delete_http2_session_data(session_data);
+                        return -1;
+                }
+        }
+        else
+        {
+                // -----------------------------------------
+                // path
+                // -----------------------------------------
+                // TODO grab from path...
+                char l_buf[2048];
+                //if(!(a_request.m_url_query.empty()))
+                //{
+                //        l_path_ref += "?";
+                //        l_path_ref += a_request.m_url_query;
+                //}
+                //NDBG_PRINT("HOST: %s PATH: %s\n", a_reqlet.m_url.m_host.c_str(), l_path_ref.c_str());
+                int l_len;
+                if(!m_url_query.empty())
+                {
+                        l_len = snprintf(l_buf, sizeof(l_buf),
+                                         "%s %s?%s HTTP/1.1",
+                                         m_verb.c_str(),
+                                         m_url_path.c_str(),
+                                         m_url_query.c_str());
+                }
+                else
+                {
+                        l_len = snprintf(l_buf, sizeof(l_buf),
+                                         "%s %s HTTP/1.1",
+                                         m_verb.c_str(),
+                                         m_url_path.c_str());
+
+                }
+                ns_hurl::nbq_write_request_line(*m_out_q, l_buf, l_len);
+                // -----------------------------------------
+                // Add repo headers
+                // -----------------------------------------
+                bool l_specd_host = false;
+                // Loop over reqlet map
+                for(ns_hurl::kv_map_list_t::const_iterator i_hl = m_headers.begin();
+                    i_hl != m_headers.end();
+                    ++i_hl)
+                {
+                        if(i_hl->first.empty() || i_hl->second.empty()) { continue;}
+                        for(ns_hurl::str_list_t::const_iterator i_v = i_hl->second.begin();
+                            i_v != i_hl->second.end();
+                            ++i_v)
+                        {
+                                ns_hurl::nbq_write_header(*m_out_q, i_hl->first.c_str(), i_hl->first.length(), i_v->c_str(), i_v->length());
+                                if (strcasecmp(i_hl->first.c_str(), "host") == 0)
+                                {
+                                        l_specd_host = true;
+                                }
+                        }
+                }
+                // -----------------------------------------
+                // Default Host if unspecified
+                // -----------------------------------------
+                if(!l_specd_host)
+                {
+                        ns_hurl::nbq_write_header(*m_out_q,
+                                                  "Host", strlen("Host"),
+                                                  m_host.c_str(), m_host.length());
+                }
+                // -----------------------------------------
+                // body
+                // -----------------------------------------
+#if 0
+                if(g_conf_body_data && g_conf_body_data_len)
+                {
+                        //NDBG_PRINT("Write: buf: %p len: %d\n", l_buf, l_len);
+                        ns_hurl::nbq_write_body(a_nbq, g_conf_body_data, g_conf_body_data_len);
+                }
+#else
+                if(0){}
+#endif
+                else
+                {
+                        ns_hurl::nbq_write_body(*m_out_q, NULL, 0);
+                }
+        }
         return STATUS_OK;
 }
 //: ----------------------------------------------------------------------------
