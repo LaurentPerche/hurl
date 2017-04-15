@@ -1569,7 +1569,6 @@ int32_t t_hurl::request_start(void)
         // Try get idle from proxy pool
         ns_hurl::nconn *l_nconn = NULL;
         // try get from idle list
-
         if(m_idle_nconn_list.empty() ||
            (m_idle_nconn_list.front() == NULL))
         {
@@ -1613,12 +1612,10 @@ int32_t t_hurl::request_start(void)
         //NDBG_PRINT("Adding http_data: %p.\n", l_clnt_session);
         l_ses->m_t_hurl = this;
         l_ses->m_timer_obj = NULL;
-
         // Setup clnt_session
         l_ses->m_nconn = l_nconn;
         l_nconn->set_data(l_ses);
         l_ses->m_request = &m_request;
-
         // ---------------------------------------
         // setup resp
         // ---------------------------------------
@@ -1636,7 +1633,6 @@ int32_t t_hurl::request_start(void)
         l_nconn->set_read_cb(ns_hurl::http_parse);
         l_nconn->set_read_cb_data(l_ses->m_resp);
         l_ses->m_resp->m_expect_resp_body_flag = m_request.m_expect_resp_body_flag;
-
         // setup q's
         if(!l_ses->m_in_q)
         {
@@ -1672,10 +1668,8 @@ int32_t t_hurl::request_start(void)
                         return session::evr_fd_error_cb(l_nconn);
                 }
         }
-
         // stats
         ++m_stat.m_upsv_reqs;
-
         if(g_stats)
         {
                 m_request.m_start_time_ms = ns_hurl::get_time_ms();
@@ -1685,7 +1679,6 @@ int32_t t_hurl::request_start(void)
         l_uss->set_last_active_ms(ns_hurl::get_time_ms());
         l_uss->set_timeout_ms(a_subr.get_timeout_ms());
 #endif
-
         // ---------------------------------------
         // idle timer
         // ---------------------------------------
@@ -1700,7 +1693,6 @@ int32_t t_hurl::request_start(void)
                 return ups_srvr_session::evr_fd_error_cb(l_nconn);
         }
 #endif
-
         // ---------------------------------------
         // Display data from out q
         // ---------------------------------------

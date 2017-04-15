@@ -285,11 +285,11 @@ int32_t nconn::nc_read(nbq *a_in_q, uint32_t &ao_read)
                 //                l_buf,
                 //                l_read_size);
                 l_s = ncread(l_buf, l_read_size);
-                //NDBG_PRINT("%sTRY_READ%s: l_bytes_read: %d\n", ANSI_COLOR_FG_RED, ANSI_COLOR_OFF, l_bytes_read);
+                //NDBG_PRINT("%sTRY_READ%s: l_bytes_read: %d\n", ANSI_COLOR_FG_RED, ANSI_COLOR_OFF, l_s);
                 //NDBG_PRINT("%sTRY_READ%s: l_bytes_read: %d old_size: %d-error:%d: %s\n",
                 //                ANSI_COLOR_FG_RED, ANSI_COLOR_OFF,
-                //                l_bytes_read,
-                //                m_in_q->read_avail(),
+                //                l_s,
+                //                (int)a_in_q->read_avail(),
                 //                errno, strerror(errno));
                 if(l_s < 0)
                 {
@@ -323,7 +323,7 @@ int32_t nconn::nc_read(nbq *a_in_q, uint32_t &ao_read)
                         int32_t l_rcb_status = m_read_cb(m_read_cb_data, l_buf, l_s, a_in_q->get_cur_write_offset());
                         if(l_rcb_status != HURL_STATUS_OK)
                         {
-                                //NDBG_PRINT("LABEL[%s]: Error performing m_read_cb\n", m_label.c_str());
+                                TRC_ERROR("LABEL[%s]: performing m_read_cb\n", m_label.c_str());
                                 return NC_STATUS_ERROR;
                         }
                 }

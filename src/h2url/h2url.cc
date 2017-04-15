@@ -143,12 +143,13 @@ static int npn_select_next_proto_cb(SSL *a_ssl,
                                     const unsigned char *a_in,
                                     unsigned int a_inlen,
                                     void *a_arg);
-
+#if 0
 static int npn_select_next_proto_advertised_cb(SSL *a_ssl,
                                                const unsigned char **a_out,
                                                unsigned int *a_outlen,
                                                void *a_arg);
-
+#endif
+int32_t http2_parse(void *a_data, char *a_buf, uint32_t a_len, uint64_t a_off);
 //: ----------------------------------------------------------------------------
 //: request object/meta
 //: ----------------------------------------------------------------------------
@@ -289,7 +290,7 @@ static ssize_t ngxxx_send_cb(nghttp2_session *a_session _U_,
 {
         request *l_request = (request *)a_user_data;
         NDBG_PRINT("SEND_CB\n");
-        ns_hurl::mem_display(a_data, a_length);
+        ns_hurl::mem_display(a_data, a_length, true);
 #if 0
         int l_s;
         l_s = SSL_write(l_request->m_tls, a_data, a_length);
@@ -496,7 +497,7 @@ int32_t request::set_header(const std::string &a_key, const std::string &a_val)
 //: ----------------------------------------------------------------------------
 int32_t request::connected_cb(ns_hurl::nconn *a_nconn, void *a_data)
 {
-        NDBG_PRINT("%sconnected%s...\n", ANSI_COLOR_FG_GREEN, ANSI_COLOR_OFF);
+        //NDBG_PRINT("%sconnected%s...\n", ANSI_COLOR_FG_GREEN, ANSI_COLOR_OFF);
         if(!a_data)
         {
                 NDBG_PRINT("error\n");
@@ -713,10 +714,9 @@ int32_t request::init_with_url(const std::string &a_url)
                 SSL_CTX_set_mode(m_tls_ctx, SSL_MODE_AUTO_RETRY);
                 SSL_CTX_set_mode(m_tls_ctx, SSL_MODE_RELEASE_BUFFERS);
 #ifdef HAS_NPN
-                NDBG_PRINT("setting npn callback\n");
                 // set npn callback
                 SSL_CTX_set_next_proto_select_cb(m_tls_ctx, npn_select_next_proto_cb, this);
-                SSL_CTX_set_next_protos_advertised_cb(m_tls_ctx, npn_select_next_proto_advertised_cb, this);
+                //SSL_CTX_set_next_protos_advertised_cb(m_tls_ctx, npn_select_next_proto_advertised_cb, this);
 #endif
 #if 0
 #ifdef HAS_ALPN
@@ -910,6 +910,8 @@ int32_t request::create_request(void)
                         //delete_http2_session_data(session_data);
                         return -1;
                 }
+                m_nconn->set_read_cb(http2_parse);
+                m_nconn->set_read_cb_data(this);
         }
         else
         {
@@ -988,6 +990,9 @@ int32_t request::create_request(void)
                 {
                         ns_hurl::nbq_write_body(*m_out_q, NULL, 0);
                 }
+                TRC_OUTPUT("%s", ANSI_COLOR_FG_YELLOW);
+                m_out_q->print();
+                TRC_OUTPUT("%s", ANSI_COLOR_OFF);
         }
         return STATUS_OK;
 }
@@ -1216,8 +1221,6 @@ int32_t request::run_state_machine(void *a_data, ns_hurl::evr_mode_t a_conn_mode
                 l_in_q = l_rx->m_in_q;
                 l_out_q = l_rx->m_out_q;
         }
-        NDBG_PRINT("l_in_q:  %p\n", l_in_q);
-        NDBG_PRINT("l_out_q: %p\n", l_out_q);
         // -------------------------------------------------
         // conn loop
         // -------------------------------------------------
@@ -1249,12 +1252,12 @@ int32_t request::run_state_machine(void *a_data, ns_hurl::evr_mode_t a_conn_mode
                                 l_rx->m_evr_loop->cancel_timer(l_rx->m_timer_obj);
                                 // TODO Check status
                                 l_rx->m_timer_obj = NULL;
-                                //if(g_conf_verbose && l_rx->m_resp)
-                                //{
-                                //        if(g_conf_color) TRC_OUTPUT("%s", ANSI_COLOR_FG_CYAN);
-                                //        l_rx->m_resp->show();
-                                //        if(g_conf_color) TRC_OUTPUT("%s", ANSI_COLOR_OFF);
-                                //}
+                                if(l_rx->m_resp)
+                                {
+                                        TRC_OUTPUT("%s", ANSI_COLOR_FG_CYAN);
+                                        l_rx->m_resp->show();
+                                        TRC_OUTPUT("%s", ANSI_COLOR_OFF);
+                                }
                                 // Get request time
                                 if(l_nconn->get_collect_stats_flag())
                                 {
@@ -1310,6 +1313,62 @@ done:
         return STATUS_OK;
 }
 //: ****************************************************************************
+//: ************************** H 2   P A R S E *********************************
+//: ****************************************************************************
+//: ----------------------------------------------------------------------------
+//: \details: TODO
+//: \return:  TODO
+//: \param:   TODO
+//: ----------------------------------------------------------------------------
+int32_t http2_parse(void *a_data, char *a_buf, uint32_t a_len, uint64_t a_off)
+{
+        if(!a_data)
+        {
+                return HURL_STATUS_ERROR;
+        }
+        request *l_request = (request *)a_data;
+        NDBG_PRINT("%sREAD%s: a_len: %d\n", ANSI_COLOR_FG_RED, ANSI_COLOR_OFF, a_len);
+        if(a_len > 0) ns_hurl::mem_display((uint8_t *)a_buf, a_len, true);
+        ssize_t l_rl;
+        l_rl = nghttp2_session_mem_recv(l_request->m_ngxxx_session, (const uint8_t *)a_buf, a_len);
+        if(l_rl < 0)
+        {
+                warnx("Fatal error: %s", nghttp2_strerror((int) l_rl));
+                // TODO
+                //delete_http2_session_data(session_data);
+                NDBG_PRINT("Fatal error: %s", nghttp2_strerror((int) l_rl));;
+                return HURL_STATUS_ERROR;
+        }
+        if(l_request->m_ngxxx_session_stream_closed)
+        {
+                NDBG_PRINT("%sREAD%s: marking complete\n", ANSI_COLOR_BG_RED, ANSI_COLOR_OFF);
+                l_request->m_resp->m_complete = true;
+        }
+#if 0
+        hmsg *l_hmsg = static_cast<hmsg *>(a_data);
+        l_hmsg->m_cur_off = a_off;
+        l_hmsg->m_cur_buf = a_buf;
+        size_t l_parse_status = 0;
+        //NDBG_PRINT("%sHTTP_PARSER%s: m_read_buf: %p, m_read_buf_idx: %d, l_bytes_read: %d\n",
+        //                ANSI_COLOR_BG_MAGENTA, ANSI_COLOR_OFF,
+        //                a_buf, (int)a_off, (int)a_len);
+        l_parse_status = http_parser_execute(l_hmsg->m_http_parser,
+                                             l_hmsg->m_http_parser_settings,
+                                             a_buf,
+                                             a_len);
+        //NDBG_PRINT("STATUS: %lu\n", l_parse_status);
+        //m_read_buf_idx += l_bytes_read;
+        if(l_parse_status < (size_t)a_len)
+        {
+                TRC_ERROR("Parse error.  Reason: %s: %s\n",
+                           http_errno_name((enum http_errno)l_hmsg->m_http_parser->http_errno),
+                           http_errno_description((enum http_errno)l_hmsg->m_http_parser->http_errno));
+                return HURL_STATUS_ERROR;
+        }
+#endif
+        return HURL_STATUS_OK;
+}
+//: ****************************************************************************
 //: ************************ N P N  S U P P O R T ******************************
 //: ****************************************************************************
 //: ----------------------------------------------------------------------------
@@ -1326,17 +1385,21 @@ static int npn_select_next_proto_cb(SSL *a_ssl _U_,
                                     unsigned int a_inlen,
                                     void *a_arg)
 {
-        NDBG_PRINT("next_proto_cb\n");
-        ns_hurl::mem_display((const uint8_t *)a_in, a_inlen);
+        printf("%s", ANSI_COLOR_FG_WHITE);
+        printf("+------------------------------------------------------------------------------+\n");
+        printf("|                               T L S   N P N                                  |\n");
+        printf("+------------------------------------------------------------------------------+\n");
+        printf("%s", ANSI_COLOR_OFF);
+        ns_hurl::mem_display((const uint8_t *)a_in, a_inlen, true);
         if(nghttp2_select_next_protocol(a_out, a_outlen, a_in, a_inlen) <= 0)
         {
-                TRC_DEBUG("Server did not advertise %s\n", NGHTTP2_PROTO_VERSION_ID);
+                //TRC_DEBUG("Server did not advertise %s\n", NGHTTP2_PROTO_VERSION_ID);
         }
         else
         {
                 if(a_arg)
                 {
-                        NDBG_PRINT("setting HTTP_PROTOCOL_V2_TLS\n");
+                        //NDBG_PRINT("setting HTTP_PROTOCOL_V2_TLS\n");
                         ((request *)a_arg)->m_conf_hp_type = request::HTTP_PROTOCOL_V2_TLS;
                 }
         }
@@ -1347,6 +1410,7 @@ static int npn_select_next_proto_cb(SSL *a_ssl _U_,
 //: \return:  TODO
 //: \param:   TODO
 //: ----------------------------------------------------------------------------
+#if 0
 static int npn_select_next_proto_advertised_cb(SSL *a_ssl,
                                                const unsigned char **a_out,
                                                unsigned int *a_outlen,
@@ -1354,46 +1418,6 @@ static int npn_select_next_proto_advertised_cb(SSL *a_ssl,
 {
         NDBG_PRINT("next_proto_cb\n");
         return SSL_TLSEXT_ERR_OK;
-}
-#if 0
-//: ----------------------------------------------------------------------------
-//: \details: TODO
-//: \return:  TODO
-//: \param:   TODO
-//: ----------------------------------------------------------------------------
-int tcp_connect(const std::string &a_host, uint16_t a_port)
-{
-        // Lookup host
-        int32_t l_s;
-        host_info l_hi;
-        l_s = nlookup(a_host, a_port, l_hi);
-        if(l_s != 0)
-        {
-                NDBG_PRINT("Error performing nslookup host: %s port: %u\n",a_host.c_str(), a_port);
-                return STATUS_ERROR;
-        }
-
-        // tcp socket
-        int l_fd;
-        l_fd = ::socket(l_hi.m_sock_family,
-                        l_hi.m_sock_type,
-                        l_hi.m_sock_protocol);
-        if (l_fd < 0)
-        {
-                NDBG_PRINT("Error creating socket. Reason: %s\n", ::strerror(errno));
-                return STATUS_ERROR;
-        }
-
-        // connect
-        l_s = ::connect(l_fd,
-                        ((struct sockaddr*) &(l_hi.m_sa)),
-                        (l_hi.m_sa_len));
-        if (l_s < 0)
-        {
-                NDBG_PRINT("Error performing connect. Reason: %s\n", ::strerror(errno));
-                return STATUS_ERROR;
-        }
-        return l_fd;
 }
 #endif
 //: ----------------------------------------------------------------------------
@@ -1462,8 +1486,8 @@ int main(int argc, char** argv)
         UNUSED(l_conf_verbose);
         UNUSED(l_conf_color);
         // TODO REMOVE!!!
-        ns_hurl::trc_log_level_set(ns_hurl::TRC_LOG_LEVEL_ALL);
-        ns_hurl::trc_log_file_open("/dev/stdout");
+        //ns_hurl::trc_log_level_set(ns_hurl::TRC_LOG_LEVEL_ALL);
+        //sns_hurl::trc_log_file_open("/dev/stdout");
         // -------------------------------------------------
         // tty???
         // -------------------------------------------------
@@ -1505,6 +1529,7 @@ int main(int argc, char** argv)
                 { "output",         1, 0, 'o' },
                 { "verbose",        0, 0, 'v' },
                 { "no_color",       0, 0, 'c' },
+                { "trace",          1, 0, 'r' },
                 // list sentinel
                 { 0, 0, 0, 0 }
         };
@@ -1529,7 +1554,7 @@ int main(int argc, char** argv)
         // -------------------------------------------------
         // Args...
         // -------------------------------------------------
-        char l_short_arg_list[] = "hVd:H:X:y:O:KNBMF:L:vc";
+        char l_short_arg_list[] = "hVd:H:X:y:O:KNBMF:L:vcr:";
         while ((l_opt = getopt_long_only(argc, argv, l_short_arg_list, l_long_options, &l_option_index)) != -1)
         {
 
@@ -1728,6 +1753,29 @@ int main(int argc, char** argv)
                         break;
                 }
                 // -----------------------------------------
+                // trace
+                // -----------------------------------------
+                case 'r':
+                {
+#define ELIF_TRACE_STR(_level) else if(strncasecmp(_level, l_arg.c_str(), sizeof(_level)) == 0)
+                        bool l_trace = false;
+                        if(0) {}
+                        ELIF_TRACE_STR("error") { ns_hurl::trc_log_level_set(ns_hurl::TRC_LOG_LEVEL_ERROR); l_trace = true; }
+                        ELIF_TRACE_STR("warn") { ns_hurl::trc_log_level_set(ns_hurl::TRC_LOG_LEVEL_WARN); l_trace = true; }
+                        ELIF_TRACE_STR("debug") { ns_hurl::trc_log_level_set(ns_hurl::TRC_LOG_LEVEL_DEBUG); l_trace = true; }
+                        ELIF_TRACE_STR("verbose") { ns_hurl::trc_log_level_set(ns_hurl::TRC_LOG_LEVEL_VERBOSE); l_trace = true; }
+                        ELIF_TRACE_STR("all") { ns_hurl::trc_log_level_set(ns_hurl::TRC_LOG_LEVEL_ALL); l_trace = true; }
+                        else
+                        {
+                                ns_hurl::trc_log_level_set(ns_hurl::TRC_LOG_LEVEL_NONE);
+                        }
+                        if(l_trace)
+                        {
+                                ns_hurl::trc_log_file_open("/dev/stdout");
+                        }
+                        break;
+                }
+                // -----------------------------------------
                 // What???
                 // -----------------------------------------
                 case '?':
@@ -1795,7 +1843,7 @@ int main(int argc, char** argv)
                         NDBG_PRINT("error performing l_request->m_evr_loop->run\n");
                 }
         }
-        NDBG_PRINT("Done.\n");
+        //NDBG_PRINT("Done.\n");
         // -------------------------------------------------
         // TODO PUT BACK!
         // -------------------------------------------------
