@@ -96,6 +96,11 @@ int32_t nconn_tcp::set_opt(uint32_t a_opt, const void *a_buf, uint32_t a_len)
                 m_sock_opt_no_delay = (bool)a_len;
                 break;
         }
+        case OPT_TCP_NO_LINGER:
+        {
+                m_sock_opt_no_linger = (bool)a_len;
+                break;
+        }
         default:
         {
                 //NDBG_PRINT("Error unsupported option: %d\n", a_opt);
@@ -414,7 +419,9 @@ int32_t nconn_tcp::ncsetup()
         // -------------------------------------------
         // TODO --set to REUSE????
         SET_SOCK_OPT(m_fd, SOL_SOCKET, SO_REUSEADDR, 1);
+#ifdef SO_REUSEPORT
         SET_SOCK_OPT(m_fd, SOL_SOCKET, SO_REUSEPORT, 1);
+#endif
         if(m_sock_opt_send_buf_size)
         {
                 SET_SOCK_OPT(m_fd, SOL_SOCKET, SO_SNDBUF, m_sock_opt_send_buf_size);
