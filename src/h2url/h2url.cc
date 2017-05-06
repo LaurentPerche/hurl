@@ -143,12 +143,6 @@ static int npn_select_next_proto_cb(SSL *a_ssl,
                                     const unsigned char *a_in,
                                     unsigned int a_inlen,
                                     void *a_arg);
-#if 0
-static int npn_select_next_proto_advertised_cb(SSL *a_ssl,
-                                               const unsigned char **a_out,
-                                               unsigned int *a_outlen,
-                                               void *a_arg);
-#endif
 int32_t http2_parse(void *a_data, char *a_buf, uint32_t a_len, uint64_t a_off);
 //: ----------------------------------------------------------------------------
 //: request object/meta
@@ -289,22 +283,11 @@ static ssize_t ngxxx_send_cb(nghttp2_session *a_session _U_,
                              void *a_user_data)
 {
         request *l_request = (request *)a_user_data;
-        NDBG_PRINT("SEND_CB\n");
-        ns_hurl::mem_display(a_data, a_length, true);
-#if 0
-        int l_s;
-        l_s = SSL_write(l_request->m_tls, a_data, a_length);
-        if((l_s < 0) ||
-           ((size_t)l_s < a_length))
-        {
-                NDBG_PRINT("Error performing SSL_write: l_s: %d\n", l_s);
-                return -1;
-        }
-#else
+        //NDBG_PRINT("SEND_CB\n");
+        //ns_hurl::mem_display(a_data, a_length, true);
         int64_t l_s;
         l_s = l_request->m_out_q->write((const char *)a_data,(uint64_t)a_length);
-#endif
-        NDBG_PRINT("%sWRITE%s: l_s: %d\n", ANSI_COLOR_FG_BLUE, ANSI_COLOR_OFF, (int)l_s);
+        //NDBG_PRINT("%sWRITE%s: l_s: %d\n", ANSI_COLOR_FG_BLUE, ANSI_COLOR_OFF, (int)l_s);
         return (ssize_t)l_s;
 }
 //: ----------------------------------------------------------------------------
@@ -317,7 +300,7 @@ static int ngxxx_frame_recv_cb(nghttp2_session *a_session,
                                const nghttp2_frame *a_frame,
                                void *a_user_data)
 {
-        NDBG_PRINT("%sFRAME%s: TYPE[%6u]\n", ANSI_COLOR_BG_MAGENTA, ANSI_COLOR_OFF, a_frame->hd.type);
+        //NDBG_PRINT("%sFRAME%s: TYPE[%6u]\n", ANSI_COLOR_BG_MAGENTA, ANSI_COLOR_OFF, a_frame->hd.type);
         request *l_request = (request *)a_user_data;
         switch (a_frame->hd.type)
         {
@@ -349,7 +332,7 @@ static int ngxxx_data_chunk_recv_cb(nghttp2_session *a_session _U_,
                                     size_t a_len,
                                     void *a_user_data)
 {
-        NDBG_PRINT("%sCHUNK%s: \n", ANSI_COLOR_BG_BLUE, ANSI_COLOR_OFF);
+        //NDBG_PRINT("%sCHUNK%s: \n", ANSI_COLOR_BG_BLUE, ANSI_COLOR_OFF);
         request *l_request = (request *)a_user_data;
         if(l_request->m_ngxxx_session_stream_id == a_stream_id)
         {
@@ -370,7 +353,7 @@ static int ngxxx_stream_close_cb(nghttp2_session *a_session,
                                  uint32_t a_error_code,
                                  void *a_user_data)
 {
-        NDBG_PRINT("%sCLOSE%s: \n", ANSI_COLOR_BG_RED, ANSI_COLOR_OFF);
+        //NDBG_PRINT("%sCLOSE%s: \n", ANSI_COLOR_BG_RED, ANSI_COLOR_OFF);
         request *l_request = (request *)a_user_data;
         int l_rv;
         l_request->m_ngxxx_session_stream_closed = true;
@@ -401,7 +384,7 @@ static int ngxxx_header_cb(nghttp2_session *a_session _U_,
                            uint8_t a_flags _U_,
                            void *a_user_data)
 {
-        NDBG_PRINT("%sHEADER%s: \n", ANSI_COLOR_BG_YELLOW, ANSI_COLOR_OFF);
+        //NDBG_PRINT("%sHEADER%s: \n", ANSI_COLOR_BG_YELLOW, ANSI_COLOR_OFF);
         request *l_request = (request *)a_user_data;
         switch (a_frame->hd.type)
         {
@@ -428,7 +411,7 @@ static int ngxxx_begin_headers_cb(nghttp2_session *a_session _U_,
                                   const nghttp2_frame *a_frame,
                                   void *a_user_data)
 {
-        NDBG_PRINT("%sBEGIN_HEADERS%s: \n", ANSI_COLOR_BG_WHITE, ANSI_COLOR_OFF);
+        //NDBG_PRINT("%sBEGIN_HEADERS%s: \n", ANSI_COLOR_BG_WHITE, ANSI_COLOR_OFF);
         request *l_request = (request *)a_user_data;
         switch (a_frame->hd.type)
         {
@@ -716,36 +699,6 @@ int32_t request::init_with_url(const std::string &a_url)
 #ifdef HAS_NPN
                 // set npn callback
                 SSL_CTX_set_next_proto_select_cb(m_tls_ctx, npn_select_next_proto_cb, this);
-                //SSL_CTX_set_next_protos_advertised_cb(m_tls_ctx, npn_select_next_proto_advertised_cb, this);
-#endif
-#if 0
-#ifdef HAS_ALPN
-                // ---------------------------------------
-                // set alpn protocols list
-                // ---------------------------------------
-                int l_cur = 0;
-                unsigned char l_protocols[128];
-                // ---------------------------------------
-                // add h2 protocol
-                // ---------------------------------------
-                l_protocols[l_cur++] = NGHTTP2_PROTO_VERSION_ID_LEN;
-                memcpy(&l_protocols[l_cur], NGHTTP2_PROTO_VERSION_ID, NGHTTP2_PROTO_VERSION_ID_LEN);
-                l_cur += NGHTTP2_PROTO_VERSION_ID_LEN;
-                NDBG_PRINT("ALPN, offering %s\n", NGHTTP2_PROTO_VERSION_ID);
-                // ---------------------------------------
-                // add http/1.1 protocol
-                // ---------------------------------------
-                l_protocols[l_cur++] = ALPN_HTTP_1_1_LENGTH;
-                memcpy(&l_protocols[l_cur], ALPN_HTTP_1_1, ALPN_HTTP_1_1_LENGTH);
-                l_cur += ALPN_HTTP_1_1_LENGTH;
-                NDBG_PRINT("ALPN, offering %s\n", ALPN_HTTP_1_1);
-                // ---------------------------------------
-                // expects length prefixed preference
-                // ordered list of protocols in wire
-                // format
-                // ---------------------------------------
-                SSL_CTX_set_alpn_protos(m_tls_ctx, l_protocols, l_cur);
-#endif
 #endif
         }
         // -------------------------------------------------
@@ -795,13 +748,13 @@ int32_t request::init_with_url(const std::string &a_url)
                               request::evr_fd_error_cb);
         m_nconn->set_label(m_host);
         m_nconn->set_connected_cb(connected_cb);
+        m_nconn->set_read_cb(ns_hurl::http_parse);
         // -------------------------------------------------
         // setup resp
         // -------------------------------------------------
         m_resp = new ns_hurl::resp();
         m_resp->init(true);
         m_resp->m_http_parser->data = m_resp;
-        m_nconn->set_read_cb(ns_hurl::http_parse);
         m_nconn->set_read_cb_data(m_resp);
         // -------------------------------------------------
         // setup q's
@@ -845,6 +798,11 @@ int32_t request::init_with_url(const std::string &a_url)
 //: ----------------------------------------------------------------------------
 int32_t request::create_request(void)
 {
+        printf("%s", ANSI_COLOR_FG_WHITE);
+        printf("+------------------------------------------------------------------------------+\n");
+        printf("|                                R E Q U E S T                                 |\n");
+        printf("+------------------------------------------------------------------------------+\n");
+        printf("%s", ANSI_COLOR_OFF);
         if(m_conf_hp_type == HTTP_PROTOCOL_V2_TLS)
         {
                 // -------------------------------------------------
@@ -990,10 +948,15 @@ int32_t request::create_request(void)
                 {
                         ns_hurl::nbq_write_body(*m_out_q, NULL, 0);
                 }
-                TRC_OUTPUT("%s", ANSI_COLOR_FG_YELLOW);
+                TRC_OUTPUT("%s", ANSI_COLOR_FG_GREEN);
                 m_out_q->print();
                 TRC_OUTPUT("%s", ANSI_COLOR_OFF);
         }
+        printf("%s", ANSI_COLOR_FG_CYAN);
+        printf("+------------------------------------------------------------------------------+\n");
+        printf("|                              R E S P O N S E                                 |\n");
+        printf("+------------------------------------------------------------------------------+\n");
+        printf("%s", ANSI_COLOR_OFF);
         return STATUS_OK;
 }
 //: ----------------------------------------------------------------------------
@@ -1140,7 +1103,7 @@ int32_t request::teardown(ns_hurl::http_status_t a_status)
 //: ----------------------------------------------------------------------------
 int32_t request::run_state_machine(void *a_data, ns_hurl::evr_mode_t a_conn_mode)
 {
-        NDBG_PRINT("RUN a_conn_mode: %d a_data: %p\n", a_conn_mode, a_data);
+        //NDBG_PRINT("RUN a_conn_mode: %d a_data: %p\n", a_conn_mode, a_data);
         //CHECK_FOR_NULL_ERROR(a_data);
         // TODO -return OK for a_data == NULL
         if(!a_data)
@@ -1229,7 +1192,7 @@ int32_t request::run_state_machine(void *a_data, ns_hurl::evr_mode_t a_conn_mode
                 uint32_t l_read = 0;
                 uint32_t l_written = 0;
                 l_s = l_nconn->nc_run_state_machine(a_conn_mode, l_in_q, l_read, l_out_q, l_written);
-                NDBG_PRINT("l_nconn->nc_run_state_machine(%d): status: %d\n", a_conn_mode, l_s);
+                //NDBG_PRINT("l_nconn->nc_run_state_machine(%d): status: %d\n", a_conn_mode, l_s);
                 if(!l_rx ||
                    (l_s == ns_hurl::nconn::NC_STATUS_EOF) ||
                    (l_s == ns_hurl::nconn::NC_STATUS_ERROR) ||
@@ -1254,9 +1217,9 @@ int32_t request::run_state_machine(void *a_data, ns_hurl::evr_mode_t a_conn_mode
                                 l_rx->m_timer_obj = NULL;
                                 if(l_rx->m_resp)
                                 {
-                                        TRC_OUTPUT("%s", ANSI_COLOR_FG_CYAN);
-                                        l_rx->m_resp->show();
-                                        TRC_OUTPUT("%s", ANSI_COLOR_OFF);
+                                        //TRC_OUTPUT("%s", ANSI_COLOR_FG_CYAN);
+                                        //l_rx->m_resp->show();
+                                        //TRC_OUTPUT("%s", ANSI_COLOR_OFF);
                                 }
                                 // Get request time
                                 if(l_nconn->get_collect_stats_flag())
@@ -1327,8 +1290,8 @@ int32_t http2_parse(void *a_data, char *a_buf, uint32_t a_len, uint64_t a_off)
                 return HURL_STATUS_ERROR;
         }
         request *l_request = (request *)a_data;
-        NDBG_PRINT("%sREAD%s: a_len: %d\n", ANSI_COLOR_FG_RED, ANSI_COLOR_OFF, a_len);
-        if(a_len > 0) ns_hurl::mem_display((uint8_t *)a_buf, a_len, true);
+        //NDBG_PRINT("%sREAD%s: a_len: %d\n", ANSI_COLOR_FG_RED, ANSI_COLOR_OFF, a_len);
+        //if(a_len > 0) ns_hurl::mem_display((uint8_t *)a_buf, a_len, true);
         ssize_t l_rl;
         l_rl = nghttp2_session_mem_recv(l_request->m_ngxxx_session, (const uint8_t *)a_buf, a_len);
         if(l_rl < 0)
@@ -1341,31 +1304,9 @@ int32_t http2_parse(void *a_data, char *a_buf, uint32_t a_len, uint64_t a_off)
         }
         if(l_request->m_ngxxx_session_stream_closed)
         {
-                NDBG_PRINT("%sREAD%s: marking complete\n", ANSI_COLOR_BG_RED, ANSI_COLOR_OFF);
+                //NDBG_PRINT("%sREAD%s: marking complete\n", ANSI_COLOR_BG_RED, ANSI_COLOR_OFF);
                 l_request->m_resp->m_complete = true;
         }
-#if 0
-        hmsg *l_hmsg = static_cast<hmsg *>(a_data);
-        l_hmsg->m_cur_off = a_off;
-        l_hmsg->m_cur_buf = a_buf;
-        size_t l_parse_status = 0;
-        //NDBG_PRINT("%sHTTP_PARSER%s: m_read_buf: %p, m_read_buf_idx: %d, l_bytes_read: %d\n",
-        //                ANSI_COLOR_BG_MAGENTA, ANSI_COLOR_OFF,
-        //                a_buf, (int)a_off, (int)a_len);
-        l_parse_status = http_parser_execute(l_hmsg->m_http_parser,
-                                             l_hmsg->m_http_parser_settings,
-                                             a_buf,
-                                             a_len);
-        //NDBG_PRINT("STATUS: %lu\n", l_parse_status);
-        //m_read_buf_idx += l_bytes_read;
-        if(l_parse_status < (size_t)a_len)
-        {
-                TRC_ERROR("Parse error.  Reason: %s: %s\n",
-                           http_errno_name((enum http_errno)l_hmsg->m_http_parser->http_errno),
-                           http_errno_description((enum http_errno)l_hmsg->m_http_parser->http_errno));
-                return HURL_STATUS_ERROR;
-        }
-#endif
         return HURL_STATUS_OK;
 }
 //: ****************************************************************************
@@ -1405,21 +1346,6 @@ static int npn_select_next_proto_cb(SSL *a_ssl _U_,
         }
         return SSL_TLSEXT_ERR_OK;
 }
-//: ----------------------------------------------------------------------------
-//: \details: TODO
-//: \return:  TODO
-//: \param:   TODO
-//: ----------------------------------------------------------------------------
-#if 0
-static int npn_select_next_proto_advertised_cb(SSL *a_ssl,
-                                               const unsigned char **a_out,
-                                               unsigned int *a_outlen,
-                                               void *a_arg)
-{
-        NDBG_PRINT("next_proto_cb\n");
-        return SSL_TLSEXT_ERR_OK;
-}
-#endif
 //: ----------------------------------------------------------------------------
 //: \details: Print the version.
 //: \return:  TODO
@@ -1832,138 +1758,17 @@ int main(int argc, char** argv)
         // -------------------------------------------------
         // run
         // -------------------------------------------------
-        NDBG_PRINT("Running.\n");
+        //NDBG_PRINT("Running.\n");
         while(l_request->m_resp->m_complete == false)
         {
-                NDBG_PRINT("Running.\n");
+                //NDBG_PRINT("Running.\n");
                 l_s = l_request->m_evr_loop->run();
                 if(l_s != HURL_STATUS_OK)
                 {
                         // TODO log run failure???
-                        NDBG_PRINT("error performing l_request->m_evr_loop->run\n");
+                        //NDBG_PRINT("error performing l_request->m_evr_loop->run\n");
                 }
         }
-        //NDBG_PRINT("Done.\n");
-        // -------------------------------------------------
-        // TODO PUT BACK!
-        // -------------------------------------------------
-#if 0
-        // -------------------------------------------------
-        // connect
-        // -------------------------------------------------
-        int32_t l_fd;
-#if 0
-        NDBG_PRINT("performing tcp_connect\n");
-        l_fd = tcp_connect(l_request->m_host, l_request->m_port);
-        if(l_fd == -1)
-        {
-                NDBG_PRINT("Error performing tcp_connect.\n");
-                return STATUS_ERROR;
-        }
-#endif
-        //printf("Connected\n");
-        // Create TLS Context
-        l_request->m_tls = ::SSL_new(l_request->m_tls_ctx);
-        // TODO Check for NULL
-        ::SSL_set_fd(l_request->m_tls, l_fd);
-        // TODO Check for Errors
-        // ssl_connect
-        ERR_clear_error();
-        NDBG_PRINT("performing SSL_connect\n");
-        l_s = SSL_connect(l_request->m_tls);
-        if(l_s <= 0)
-        {
-                NDBG_PRINT("Error performing SSL_connect.\n");
-                // TODO Reason...
-                if(l_request->m_tls) {SSL_free(l_request->m_tls); l_request->m_tls = NULL;}
-                return STATUS_ERROR;
-        }
-        // -------------------------------------------------
-        // send connection header
-        // -------------------------------------------------
-        nghttp2_settings_entry l_iv[1] = {
-                { NGHTTP2_SETTINGS_MAX_CONCURRENT_STREAMS, 100 }
-        };
-        // client 24 bytes magic string will be sent by nghttp2 library
-        l_s = nghttp2_submit_settings(l_request->m_ngxxx_session, NGHTTP2_FLAG_NONE, l_iv, ARRLEN(l_iv));
-        if(l_s != 0)
-        {
-                errx(1, "Could not submit SETTINGS: %s", nghttp2_strerror(l_s));
-        }
-        // -------------------------------------------------
-        // send request
-        // -------------------------------------------------
-        int32_t l_id;
-        //printf("[INFO] path      = %s\n", a_path.c_str());
-        //printf("[INFO] authority = %s\n", a_host.c_str());
-        // -------------------------------------------------
-        // authority note:
-        // -------------------------------------------------
-        // is the concatenation of host and port with ":" in
-        // between.
-        // -------------------------------------------------
-#define MAKE_NV(NAME, VALUE, VALUELEN) {(uint8_t *) NAME, (uint8_t *)VALUE, sizeof(NAME) - 1, VALUELEN, NGHTTP2_NV_FLAG_NONE}
-#define MAKE_NV2(NAME, VALUE)          {(uint8_t *) NAME, (uint8_t *)VALUE, sizeof(NAME) - 1, sizeof(VALUE) - 1, NGHTTP2_NV_FLAG_NONE}
-
-        nghttp2_nv l_hdrs[] = {
-                MAKE_NV(  ":method", l_request->m_verb.c_str(), l_request->m_verb.length()),
-                MAKE_NV(  ":path",   l_request->m_url_path.c_str(), l_request->m_url_path.length()),
-                MAKE_NV2( ":scheme", "https"),
-                MAKE_NV(  ":authority", l_request->m_host.c_str(), l_request->m_host.length()),
-                MAKE_NV2( "accept", "*/*"),
-                MAKE_NV2( "user-agent", "nghttp2/" NGHTTP2_VERSION)
-        };
-        // print headers
-        for(size_t i_h = 0; i_h < ARRLEN(l_hdrs); ++i_h)
-        {
-                fprintf(stdout, "%s%.*s%s: %s%.*s%s\n",
-                        ANSI_COLOR_FG_BLUE, (int)l_hdrs[i_h].namelen, l_hdrs[i_h].name, ANSI_COLOR_OFF,
-                        ANSI_COLOR_FG_GREEN, (int)l_hdrs[i_h].valuelen, l_hdrs[i_h].value, ANSI_COLOR_OFF);
-        }
-        fprintf(stdout, "\n");
-        //fprintf(stderr, "Request headers:\n");
-        l_id = nghttp2_submit_request(l_request->m_ngxxx_session, NULL, l_hdrs, ARRLEN(l_hdrs), NULL, l_request);
-        if (l_id < 0)
-        {
-                errx(1, "Could not submit HTTP request: %s", nghttp2_strerror(l_id));
-        }
-        //printf("[INFO] Stream ID = %d\n", l_id);
-        l_request->m_ngxxx_session_stream_id = l_id;
-        // -------------------------------------------------
-        // read response
-        // -------------------------------------------------
-        while(!l_request->m_ngxxx_session_stream_closed)
-        {
-                // -----------------------------------------
-                // session send???
-                // -----------------------------------------
-                l_s = nghttp2_session_send(l_request->m_ngxxx_session);
-                if (l_s != 0)
-                {
-                        warnx("Fatal error: %s", nghttp2_strerror(l_s));
-                        // TODO
-                        //delete_http2_session_data(session_data);
-                        return -1;
-                }
-                //NDBG_PRINT("nghttp2_session_send: %d\n", l_s);
-                // -----------------------------------------
-                // read response...
-                // -----------------------------------------
-                char l_buf[16384];
-                l_s = SSL_read(l_request->m_tls, l_buf, 16384);
-                //NDBG_PRINT("%sREAD%s: l_s: %d\n", ANSI_COLOR_FG_RED, ANSI_COLOR_OFF, l_s);
-                //if(l_s > 0) ns_hurl::mem_display((uint8_t *)l_buf, l_s);
-                ssize_t l_rl;
-                l_rl = nghttp2_session_mem_recv(l_request->m_ngxxx_session, (const uint8_t *)l_buf, l_s);
-                if(l_rl < 0)
-                {
-                        warnx("Fatal error: %s", nghttp2_strerror((int) l_rl));
-                        // TODO
-                        //delete_http2_session_data(session_data);
-                        return -1;
-                }
-        }
-#endif
         // -------------------------------------------------
         // Cleanup...
         // -------------------------------------------------
