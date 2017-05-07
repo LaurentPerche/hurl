@@ -491,13 +491,6 @@ int32_t request::connected_cb(ns_hurl::nconn *a_nconn, void *a_data)
            ns_hurl::nconn_get_SSL(*(l_request->m_nconn)))
         {
                 SSL *l_tls = ns_hurl::nconn_get_SSL(*(l_request->m_nconn));
-                SSL_SESSION *m_tls_session = SSL_get_session(l_tls);
-                printf("%s", ANSI_COLOR_FG_YELLOW);
-                printf("+------------------------------------------------------------------------------+\n");
-                printf("|                      T L S   S E S S I O N   I N F O                         |\n");
-                printf("+------------------------------------------------------------------------------+\n");
-                printf("%s", ANSI_COLOR_OFF);
-                SSL_SESSION_print_fp(stdout, m_tls_session);
                 X509* l_cert = NULL;
                 l_cert = SSL_get_peer_certificate(l_tls);
                 if(l_cert == NULL)
@@ -511,6 +504,13 @@ int32_t request::connected_cb(ns_hurl::nconn *a_nconn, void *a_data)
                 printf("+------------------------------------------------------------------------------+\n");
                 printf("%s", ANSI_COLOR_OFF);
                 X509_print_fp(stdout, l_cert);
+                SSL_SESSION *m_tls_session = SSL_get_session(l_tls);
+                printf("%s", ANSI_COLOR_FG_YELLOW);
+                printf("+------------------------------------------------------------------------------+\n");
+                printf("|                      T L S   S E S S I O N   I N F O                         |\n");
+                printf("+------------------------------------------------------------------------------+\n");
+                printf("%s", ANSI_COLOR_OFF);
+                SSL_SESSION_print_fp(stdout, m_tls_session);
                 //int32_t l_protocol_num = ns_hurl::get_tls_info_protocol_num(l_tls);
                 //std::string l_cipher = ns_hurl::get_tls_info_cipher_str(l_tls);
                 //std::string l_protocol = ns_hurl::get_tls_info_protocol_str(l_protocol_num);
@@ -1215,11 +1215,10 @@ int32_t request::run_state_machine(void *a_data, ns_hurl::evr_mode_t a_conn_mode
                                 l_rx->m_evr_loop->cancel_timer(l_rx->m_timer_obj);
                                 // TODO Check status
                                 l_rx->m_timer_obj = NULL;
-                                if(l_rx->m_resp)
+                                if((l_rx->m_resp) &&
+                                   (l_rx->m_conf_hp_type != HTTP_PROTOCOL_V2_TLS))
                                 {
-                                        //TRC_OUTPUT("%s", ANSI_COLOR_FG_CYAN);
-                                        //l_rx->m_resp->show();
-                                        //TRC_OUTPUT("%s", ANSI_COLOR_OFF);
+                                        l_rx->m_resp->show();
                                 }
                                 // Get request time
                                 if(l_nconn->get_collect_stats_flag())
