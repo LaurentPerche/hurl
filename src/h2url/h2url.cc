@@ -1215,11 +1215,6 @@ int32_t request::run_state_machine(void *a_data, ns_hurl::evr_mode_t a_conn_mode
                                 l_rx->m_evr_loop->cancel_timer(l_rx->m_timer_obj);
                                 // TODO Check status
                                 l_rx->m_timer_obj = NULL;
-                                if((l_rx->m_resp) &&
-                                   (l_rx->m_conf_hp_type != HTTP_PROTOCOL_V2_TLS))
-                                {
-                                        l_rx->m_resp->show();
-                                }
                                 // Get request time
                                 if(l_nconn->get_collect_stats_flag())
                                 {
@@ -1370,10 +1365,15 @@ void print_usage(FILE* a_stream, int a_exit_code)
         fprintf(a_stream, "  -V, --version        Display the version number and exit.\n");
         fprintf(a_stream, "  \n");
         fprintf(a_stream, "Settings:\n");
+#if 0
         fprintf(a_stream, "  -d, --data           HTTP body data -supports curl style @ file specifier\n");
+#endif
+#if 0
         fprintf(a_stream, "  -H, --header         Request headers -can add multiple ie -H<> -H<>...\n");
+#endif
         fprintf(a_stream, "  -X, --verb           Request command -HTTP verb to use -GET/PUT/etc. Default GET\n");
         fprintf(a_stream, "  \n");
+#if 0
         fprintf(a_stream, "TLS Settings:\n");
         fprintf(a_stream, "  -y, --cipher         Cipher --see \"openssl ciphers\" for list.\n");
         fprintf(a_stream, "  -O, --tls_options    SSL Options string.\n");
@@ -1384,16 +1384,23 @@ void print_usage(FILE* a_stream, int a_exit_code)
         fprintf(a_stream, "  -F, --tls_ca_file    SSL CA File.\n");
         fprintf(a_stream, "  -L, --tls_ca_path    SSL CA Path.\n");
         fprintf(a_stream, "  \n");
+#endif
+#if 0
         fprintf(a_stream, "Output Options: -defaults to line delimited\n");
         fprintf(a_stream, "  -o, --output         File to write output to. Defaults to stdout\n");
         fprintf(a_stream, "  \n");
+#endif
+#if 0
         fprintf(a_stream, "Print Options:\n");
         fprintf(a_stream, "  -v, --verbose        Verbose logging\n");
         fprintf(a_stream, "  -c, --no_color       Turn off colors\n");
         fprintf(a_stream, "  \n");
+#endif
+#if 0
         fprintf(a_stream, "Debug Options:\n");
         fprintf(a_stream, "  -r, --trace          Turn on tracing (error/warn/debug/verbose/all)\n");
         fprintf(a_stream, "  \n");
+#endif
         exit(a_exit_code);
 }
 //: ----------------------------------------------------------------------------
@@ -1510,6 +1517,7 @@ int main(int argc, char** argv)
                         print_version(stdout, 0);
                         break;
                 }
+#if 0
                 // -----------------------------------------
                 // data
                 // -----------------------------------------
@@ -1547,6 +1555,8 @@ int main(int argc, char** argv)
                         l_request->set_header("Content-Length", l_len_str);
                         break;
                 }
+#endif
+#if 0
                 // -----------------------------------------
                 // header
                 // -----------------------------------------
@@ -1569,6 +1579,7 @@ int main(int argc, char** argv)
                         }
                         break;
                 }
+#endif
                 // -----------------------------------------
                 // verb
                 // -----------------------------------------
@@ -1582,6 +1593,7 @@ int main(int argc, char** argv)
                         l_request->m_verb = l_arg;
                         break;
                 }
+#if 0
                 // -----------------------------------------
                 // cipher
                 // -----------------------------------------
@@ -1653,6 +1665,8 @@ int main(int argc, char** argv)
                         l_request->m_conf_tls_ca_path = l_arg;
                         break;
                 }
+#endif
+#if 0
                 // -----------------------------------------
                 // output file
                 // -----------------------------------------
@@ -1661,6 +1675,8 @@ int main(int argc, char** argv)
                         l_output_file = l_arg;
                         break;
                 }
+#endif
+#if 0
                 // -----------------------------------------
                 // verbose
                 // -----------------------------------------
@@ -1669,6 +1685,8 @@ int main(int argc, char** argv)
                         l_conf_verbose = true;
                         break;
                 }
+#endif
+#if 0
                 // -----------------------------------------
                 // color
                 // -----------------------------------------
@@ -1677,6 +1695,8 @@ int main(int argc, char** argv)
                         l_conf_color = false;
                         break;
                 }
+#endif
+#if 0
                 // -----------------------------------------
                 // trace
                 // -----------------------------------------
@@ -1700,6 +1720,7 @@ int main(int argc, char** argv)
                         }
                         break;
                 }
+#endif
                 // -----------------------------------------
                 // What???
                 // -----------------------------------------
@@ -1708,7 +1729,7 @@ int main(int argc, char** argv)
                         // Required argument was missing
                         // '?' is provided when the 3rd arg to getopt_long does not begin with a ':', and is preceeded
                         // by an automatic error message.
-                        printf("  Exiting.\n");
+                        printf("exiting...\n");
                         print_usage(stdout, STATUS_ERROR);
                         break;
                 }
@@ -1717,7 +1738,7 @@ int main(int argc, char** argv)
                 // -----------------------------------------
                 default:
                 {
-                        printf("Unrecognized option.\n");
+                        printf("unrecognized option.\n");
                         print_usage(stdout, STATUS_ERROR);
                         break;
                 }
@@ -1728,14 +1749,14 @@ int main(int argc, char** argv)
         // -------------------------------------------------
         if(l_url.empty())
         {
-                printf("Error: url required.");
+                printf("error: url required.");
                 print_usage(stdout, STATUS_ERROR);
         }
         int32_t l_s;
         l_s = l_request->init_with_url(l_url);
         if(l_s != HURL_STATUS_OK)
         {
-                printf("Error: performing init_with_url.");
+                printf("error: performing init_with_url.");
                 print_usage(stdout, STATUS_ERROR);
         }
         // -------------------------------------------------
@@ -1745,14 +1766,13 @@ int main(int argc, char** argv)
         l_s = ns_hurl::nlookup(l_request->m_host, l_request->m_port, l_host_info);
         if(l_s != HURL_STATUS_OK)
         {
-                printf("Error: resolving: %s:%d\n", l_request->m_host.c_str(), l_request->m_port);
+                printf("error: resolving: %s:%d\n", l_request->m_host.c_str(), l_request->m_port);
                 return HURL_STATUS_ERROR;
         }
         l_request->m_nconn->set_host_info(l_host_info);
         // -------------------------------------------------
         // create request
         // -------------------------------------------------
-        // TODO
         request::evr_fd_writeable_cb(l_request->m_nconn);
         // -------------------------------------------------
         // run
@@ -1767,6 +1787,14 @@ int main(int argc, char** argv)
                         // TODO log run failure???
                         //NDBG_PRINT("error performing l_request->m_evr_loop->run\n");
                 }
+        }
+        // -------------------------------------------------
+        // response
+        // -------------------------------------------------
+        if((l_request->m_resp) &&
+           (l_request->m_conf_hp_type != request::HTTP_PROTOCOL_V2_TLS))
+        {
+                l_request->m_resp->show();
         }
         // -------------------------------------------------
         // Cleanup...
