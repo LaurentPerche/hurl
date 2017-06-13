@@ -181,10 +181,13 @@ typedef struct xstat_struct
 //: ----------------------------------------------------------------------------
 typedef struct t_stat_cntr_struct
 {
+        // TODO fix stat calcs
+#if 0
         // Stats
         xstat_t m_stat_us_connect;
         xstat_t m_stat_us_first_response;
         xstat_t m_stat_us_end_to_end;
+#endif
         // Upstream stats
         uint64_t m_conn_started;
         uint64_t m_conn_completed;
@@ -205,9 +208,12 @@ typedef struct t_stat_cntr_struct
         uint64_t m_total_run;
         uint64_t m_total_add_timer;
         t_stat_cntr_struct():
+                // TODO fix stat calcs
+#if 0
                 m_stat_us_connect(),
                 m_stat_us_first_response(),
                 m_stat_us_end_to_end(),
+#endif
                 m_conn_started(0),
                 m_conn_completed(0),
                 m_reqs(0),
@@ -226,10 +232,13 @@ typedef struct t_stat_cntr_struct
         {}
         void clear()
         {
+                // TODO fix stat calcs
+#if 0
                 m_stat_us_connect.clear();
                 m_stat_us_connect.clear();
                 m_stat_us_first_response.clear();
                 m_stat_us_end_to_end.clear();
+#endif
                 m_conn_started = 0;
                 m_conn_completed = 0;
                 m_reqs = 0;
@@ -1718,9 +1727,12 @@ int32_t t_hurl::cleanup_session(session *a_ses, ns_hurl::nconn *a_nconn)
 //: ----------------------------------------------------------------------------
 void t_hurl::add_stat_to_agg(const ns_hurl::conn_stat_t &a_conn_stat, uint16_t a_status_code)
 {
+        // TODO fix stat calcs
+#if 0
         update_stat(m_stat.m_stat_us_connect, a_conn_stat.m_tt_connect_us);
         update_stat(m_stat.m_stat_us_first_response, a_conn_stat.m_tt_first_read_us);
         update_stat(m_stat.m_stat_us_end_to_end, a_conn_stat.m_tt_completion_us);
+#endif
         ++m_status_code_count_map[a_status_code];
 }
 //: ----------------------------------------------------------------------------
@@ -2191,9 +2203,12 @@ void get_stat(t_stat_cntr_t &ao_total,
                 ao_total.m_resp_status_3xx = (*i_t)->m_stat.m_resp_status_3xx;
                 ao_total.m_resp_status_4xx = (*i_t)->m_stat.m_resp_status_4xx;
                 ao_total.m_resp_status_5xx = (*i_t)->m_stat.m_resp_status_5xx;
+                // TODO fix stat calcs
+#if 0
                 add_stat(ao_total.m_stat_us_connect , (*i_t)->m_stat.m_stat_us_connect);
                 add_stat(ao_total.m_stat_us_first_response , (*i_t)->m_stat.m_stat_us_first_response);
                 add_stat(ao_total.m_stat_us_end_to_end , (*i_t)->m_stat.m_stat_us_end_to_end);
+#endif
         }
         // -------------------------------------------------
         // calc'd stats
@@ -3243,6 +3258,9 @@ int main(int argc, char** argv)
                 STR_PRINT("| mean bytes/conn:     %f\n", ((double)l_total_bytes)/((double)l_total.m_resp));
                 STR_PRINT("| fetches/sec:         %f\n", ((double)l_total.m_resp)/(l_elapsed_time_s));
                 STR_PRINT("| bytes/sec:           %e\n", ((double)l_total_bytes)/l_elapsed_time_s);
+
+                // TODO fix stat calcs
+#if 0
                 // TODO Fix stdev/var calcs
 #if 0
 #define SHOW_XSTAT_LINE(_tag, stat)\
@@ -3268,6 +3286,7 @@ int main(int argc, char** argv)
                 SHOW_XSTAT_LINE("ms/connect:", l_total.m_stat_us_connect);
                 SHOW_XSTAT_LINE("ms/1st-response:", l_total.m_stat_us_first_response);
                 SHOW_XSTAT_LINE("ms/end2end:", l_total.m_stat_us_end_to_end);
+#endif
                 STR_PRINT("| %sHTTP response codes%s: \n", l_c_fg_green, l_c_off);
                 for(status_code_count_map_t::const_iterator i_status_code = l_status_code_count_map.begin();
                     i_status_code != l_status_code_count_map.end();
@@ -3289,6 +3308,8 @@ int main(int argc, char** argv)
                 ADD_MEMBER("mean-bytes-per-conn", ((double)l_total_bytes)/((double)l_total.m_resp));
                 ADD_MEMBER("fetches-per-sec", ((double)l_total.m_resp)/(l_elapsed_time_s));
                 ADD_MEMBER("bytes-per-sec", ((double)l_total_bytes)/l_elapsed_time_s);
+                // TODO fix stat calcs
+#if 0
                 // TODO Fix stdev/var calcs
                 ADD_MEMBER("connect-ms-mean", l_total.m_stat_us_connect.mean()/1000.0);
                 ADD_MEMBER("connect-ms-max", l_total.m_stat_us_connect.max()/1000.0);
@@ -3299,6 +3320,7 @@ int main(int argc, char** argv)
                 ADD_MEMBER("end2end-ms-mean", l_total.m_stat_us_end_to_end.mean()/1000.0);
                 ADD_MEMBER("end2end-ms-max", l_total.m_stat_us_end_to_end.max()/1000.0);
                 ADD_MEMBER("end2end-ms-min", l_total.m_stat_us_end_to_end.min()/1000.0);
+#endif
                 if(l_status_code_count_map.size())
                 {
                 rapidjson::Value l_obj;
