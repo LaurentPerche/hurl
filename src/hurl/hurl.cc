@@ -361,8 +361,7 @@ public:
                 m_completion_cb(NULL),
                 m_error_cb(NULL),
                 m_host_info(),
-                m_data(NULL),
-                m_start_time_ms(0)
+                m_data(NULL)
         {};
         request(const request &a_r):
                 m_uid(a_r.m_uid),
@@ -384,8 +383,7 @@ public:
                 m_completion_cb(a_r.m_completion_cb),
                 m_error_cb(a_r.m_error_cb),
                 m_host_info(a_r.m_host_info),
-                m_data(a_r.m_data),
-                m_start_time_ms(a_r.m_start_time_ms)
+                m_data(a_r.m_data)
         {}
         int set_header(const std::string &a_key, const std::string &a_val)
         {
@@ -449,7 +447,6 @@ public:
         error_cb_t m_error_cb;
         ns_hurl::host_info m_host_info;
         void *m_data;
-        uint64_t m_start_time_ms;
 private:
         // Disallow copy/assign
         request& operator=(const request &);
@@ -698,6 +695,24 @@ public:
                 ns_hurl::evr_timer_t *l_t = static_cast<ns_hurl::evr_timer_t *>(a_timer);
                 return m_evr_loop->cancel_timer(l_t);
         }
+        bool can_request(void)
+        {
+                //NDBG_PRINT("m_num_parallel_max: %d\n",(int)m_num_parallel_max);
+                //NDBG_PRINT("m_num_in_progress:  %d\n",(int)m_num_in_progress);
+                //NDBG_PRINT("m_num_to_request:   %d\n",(int)m_num_to_request);
+                //NDBG_PRINT("m_stat.m_reqs:      %d\n",(int)m_stat.m_reqs);
+                if(!g_test_finished &&
+                   !m_stopped &&
+                   (m_num_in_progress < m_num_parallel_max) &&
+                   ((m_num_to_request < 0) ||
+                    ((uint32_t)m_num_to_request > m_stat.m_reqs)))
+                {
+                        //NDBG_PRINT("CAN:                TRUE\n");
+                        return true;
+                }
+                //NDBG_PRINT("CAN:                FALSE\n");
+                return false;
+        }
         int32_t cleanup_session(session *a_ses, ns_hurl::nconn *a_nconn);
         void add_stat_to_agg(const ns_hurl::conn_stat_t &a_conn_stat, uint16_t a_status_code);
         // -------------------------------------------------
@@ -727,7 +742,7 @@ private:
                 return reinterpret_cast<t_hurl *>(a_context)->t_run(NULL);
         }
         ns_hurl::nconn *create_new_nconn(void);
-        int32_t request_start(void);
+        int32_t request_start(ns_hurl::nconn *a_nconn);
         int32_t request_dequeue(void);
         // -------------------------------------------------
         // Private members
@@ -1255,6 +1270,29 @@ int32_t session::run_state_machine(void *a_data, ns_hurl::evr_mode_t a_conn_mode
                                         l_s = ns_hurl::nconn::NC_STATUS_EOF;
                                         goto check_conn_status;
                                 }
+                                if(l_t_hurl->can_request())
+                                {
+                                        // ---------------------------------------
+                                        // start writing request
+                                        // ---------------------------------------
+                                        //NDBG_PRINT("%sSTARTING REQUEST...%s\n", ANSI_COLOR_FG_RED, ANSI_COLOR_OFF);
+                                        l_nconn->nc_set_connected();
+                                        // stats
+                                        if(g_stats)
+                                        {
+                                                l_nconn->set_request_start_time_us(ns_hurl::get_time_us());
+                                        }
+                                        ++l_t_hurl->m_stat.m_reqs;
+                                        ++l_t_hurl->m_num_in_progress;
+                                        l_out_q->reset_read();
+                                        l_s = session::evr_fd_writeable_cb(l_nconn);
+                                        if(l_s != HURL_STATUS_OK)
+                                        {
+                                                TRC_ERROR("performing evr_fd_writeable_cb\n");
+                                                return HURL_STATUS_ERROR;
+                                        }
+                                        return HURL_STATUS_OK;
+                                }
                                 // Give back rqst + in q
                                 if(l_t_hurl)
                                 {
@@ -1380,26 +1418,24 @@ void *t_hurl::t_run(void *a_nothing)
         }
         m_stopped = false;
         m_stat.clear();
-        l_s = request_dequeue();
-        // TODO check return status???
         // -------------------------------------------------
         // Run server
         // -------------------------------------------------
         while((!m_stopped) &&
               ((m_num_to_request < 0) || ((uint32_t)m_num_to_request > m_stat.m_resp)))
         {
-                //NDBG_PRINT("Running.\n");
-                l_s = m_evr_loop->run();
-                if(l_s != HURL_STATUS_OK)
-                {
-                        // TODO log run failure???
-                }
                 // Subrequests
                 l_s = request_dequeue();
                 if(l_s != HURL_STATUS_OK)
                 {
                         //NDBG_PRINT("Error performing subr_try_deq.\n");
                         //return NULL;
+                }
+                //NDBG_PRINT("Running.\n");
+                l_s = m_evr_loop->run();
+                if(l_s != HURL_STATUS_OK)
+                {
+                        // TODO log run failure???
                 }
         }
         //NDBG_PRINT("Stopped...\n");
@@ -1414,13 +1450,34 @@ void *t_hurl::t_run(void *a_nothing)
 int32_t t_hurl::request_dequeue(void)
 {
         uint32_t l_dq = 0;
-        while(!g_test_finished &&
-              !m_stopped &&
-              (m_num_in_progress < m_num_parallel_max) &&
-              ((m_num_to_request < 0) || ((uint32_t)m_num_to_request > m_stat.m_reqs)))
+        while(can_request())
         {
                 int32_t l_s;
-                l_s = request_start();
+                // Try get idle from proxy pool
+                ns_hurl::nconn *l_nconn = NULL;
+                // try get from idle list
+                if(m_idle_nconn_list.empty() ||
+                   (m_idle_nconn_list.front() == NULL))
+                {
+                        l_nconn = create_new_nconn();
+                        l_nconn->set_label(m_request.m_host);
+                        m_active_nconn_map[l_nconn] = l_nconn;
+                        //NDBG_PRINT("%sCREATING NEW CONNECTION%s\n", ANSI_COLOR_BG_RED, ANSI_COLOR_OFF);
+                }
+                else
+                {
+                        l_nconn = m_idle_nconn_list.front();
+                        m_idle_nconn_list.pop_front();
+                        m_active_nconn_map[l_nconn] = l_nconn;
+                }
+                if(!l_nconn)
+                {
+                        // TODO fatal???
+                        TRC_ERROR("l_nconn == NULL\n");
+                        return HURL_STATUS_ERROR;
+
+                }
+                l_s = request_start(l_nconn);
                 if(l_s != HURL_STATUS_OK)
                 {
                         // Log error
@@ -1486,44 +1543,28 @@ ns_hurl::nconn *t_hurl::create_new_nconn(void)
 //: \return:  TODO
 //: \param:   TODO
 //: ----------------------------------------------------------------------------
-int32_t t_hurl::request_start(void)
+int32_t t_hurl::request_start(ns_hurl::nconn *a_nconn)
 {
+        if(!a_nconn)
+        {
+                // TODO fatal???
+                TRC_ERROR("a_nconn == NULL\n");
+                return HURL_STATUS_ERROR;
+
+        }
         //NDBG_PRINT("%ssubr label%s: %s --HOST: %s\n",
         //                ANSI_COLOR_FG_RED, ANSI_COLOR_OFF,
         //                m_subr.get_label().c_str(), m_subr.get_host().c_str());
-        int32_t l_s;
-        // Try get idle from proxy pool
-        ns_hurl::nconn *l_nconn = NULL;
-        // try get from idle list
-        if(m_idle_nconn_list.empty() ||
-           (m_idle_nconn_list.front() == NULL))
-        {
-                l_nconn = create_new_nconn();
-                l_nconn->set_label(m_request.m_host);
-                m_active_nconn_map[l_nconn] = l_nconn;
-                //NDBG_PRINT("%sCREATING NEW CONNECTION%s\n", ANSI_COLOR_BG_RED, ANSI_COLOR_OFF);
-        }
-        else
-        {
-                l_nconn = m_idle_nconn_list.front();
-                m_idle_nconn_list.pop_front();
-                m_active_nconn_map[l_nconn] = l_nconn;
-        }
-        if(!l_nconn)
-        {
-                // TODO fatal???
-                TRC_ERROR("l_nconn == NULL\n");
-                return HURL_STATUS_ERROR;
-        }
         // Reset stats
         if(g_stats)
         {
-                l_nconn->set_collect_stats(g_stats);
-                l_nconn->reset_stats();
+                a_nconn->set_collect_stats(g_stats);
+                a_nconn->reset_stats();
         }
         // ---------------------------------------
         // setup session
         // ---------------------------------------
+        int32_t l_s;
         session *l_ses = NULL;
         bool l_ses_reused = false;
         l_ses = m_session_pool.get_free();
@@ -1541,8 +1582,8 @@ int32_t t_hurl::request_start(void)
         l_ses->m_t_hurl = this;
         l_ses->m_timer_obj = NULL;
         // Setup clnt_session
-        l_ses->m_nconn = l_nconn;
-        l_nconn->set_data(l_ses);
+        l_ses->m_nconn = a_nconn;
+        a_nconn->set_data(l_ses);
         l_ses->m_request = &m_request;
         // ---------------------------------------
         // setup resp
@@ -1558,8 +1599,8 @@ int32_t t_hurl::request_start(void)
         }
         l_ses->m_resp->init(g_verbose);
         l_ses->m_resp->m_http_parser->data = l_ses->m_resp;
-        l_nconn->set_read_cb(ns_hurl::http_parse);
-        l_nconn->set_read_cb_data(l_ses->m_resp);
+        a_nconn->set_read_cb(ns_hurl::http_parse);
+        a_nconn->set_read_cb_data(l_ses->m_resp);
         l_ses->m_resp->m_expect_resp_body_flag = m_request.m_expect_resp_body_flag;
         // setup q's
         if(!l_ses->m_in_q)
@@ -1593,15 +1634,14 @@ int32_t t_hurl::request_start(void)
                 if(HURL_STATUS_OK != l_s)
                 {
                         TRC_ERROR("performing create_request\n");
-                        return session::evr_fd_error_cb(l_nconn);
+                        return session::evr_fd_error_cb(a_nconn);
                 }
         }
         // stats
         ++m_stat.m_reqs;
         if(g_stats)
         {
-                m_request.m_start_time_ms = ns_hurl::get_time_ms();
-                l_nconn->set_request_start_time_us(ns_hurl::get_time_us());
+                a_nconn->set_request_start_time_us(ns_hurl::get_time_us());
         }
 #if 0
         l_uss->set_last_active_ms(ns_hurl::get_time_ms());
@@ -1634,7 +1674,7 @@ int32_t t_hurl::request_start(void)
         // start writing request
         // ---------------------------------------
         //NDBG_PRINT("%sSTARTING REQUEST...%s\n", ANSI_COLOR_FG_RED, ANSI_COLOR_OFF);
-        l_s = session::evr_fd_writeable_cb(l_nconn);
+        l_s = session::evr_fd_writeable_cb(a_nconn);
         if(l_s != HURL_STATUS_OK)
         {
                 TRC_ERROR("performing evr_fd_writeable_cb\n");
